@@ -15,6 +15,7 @@ import os
 import re
 import sqlite3
 import time
+import unicodedata
 from datetime import datetime
 from html import unescape
 
@@ -24,6 +25,30 @@ from app.config import POLL_BATCH_LIMIT
 from app.models import Message
 
 log = logging.getLogger("app.db")
+
+# 不可见昵称关键词（unicodedata.name 中出现这些词的字符视为不可见）
+_BLANK_NAME_KEYWORDS = (
+    "FILLER", "SPACE", "ZERO WIDTH", "JOINER", "SEPARATOR",
+    "BOPOMOFO LETTER", "HANGUL FILLER",
+)
+
+
+def _is_blank_name(name: str) -> bool:
+    """判断昵称是否全为不可见字符（空白、零宽、U+3164 等）。"""
+    if not name:
+        return True
+    for c in name:
+        cat = unicodedata.category(c)
+        if cat[0] in ("Z", "C"):       # 分隔符 / 控制符
+            continue
+        try:
+            uname = unicodedata.name(c, "")
+        except ValueError:
+            uname = ""
+        if any(k in uname for k in _BLANK_NAME_KEYWORDS):
+            continue
+        return False                     # 存在可见字符
+    return True
 
 # 解密缓存页损坏（微信正在写库/WAL 撕裂）时的应用级退避：
 # wechatauto 内部已做"清缓存重建+重试一次"，这里再给两轮等待，
@@ -199,26 +224,36 @@ class MessagePoller:
 
     def _self_name(self) -> str:
         if not self._self_name_cache:
+            name = ""
             try:
                 info = self._db.get_self_info() or {}
-                self._self_name_cache = info.get("nickname") or self._self_wxid
+                # wechatauto 返回 nick_name，部分版本可能是 nickname
+                name = info.get("nick_name") or info.get("nickname") or ""
             except Exception:
-                self._self_name_cache = "我"
+                name = ""
+            # 空白/不可见昵称（含 U+3164 HANGUL FILLER、零宽字符等）
+            # 时用"我"代替
+            if not name or _is_blank_name(name):
+                name = "我"
+            self._self_name_cache = name
         return self._self_name_cache
 
     def _display_name(self, chatroom_id: str, wxid: str) -> str:
         """wxid → 展示名（群成员表 > contact 昵称 > wxid）。"""
         members = self._chatroom_members(chatroom_id)
         if wxid in members:
-            return members[wxid]
-        if wxid in self._nick_cache:
-            return self._nick_cache[wxid]
-        name = ""
-        try:
-            name = self._db.get_nickname(wxid) or ""
-        except Exception:
-            pass
-        name = name or wxid
+            name = members[wxid]
+        else:
+            if wxid in self._nick_cache:
+                return self._nick_cache[wxid]
+            name = ""
+            try:
+                name = self._db.get_nickname(wxid) or ""
+            except Exception:
+                pass
+        # 空白/不可见昵称时用 wxid 兜底（避免一群人都显示成空白或"我"）
+        if not name or _is_blank_name(name):
+            name = wxid
         self._nick_cache[wxid] = name
         return name
 
@@ -226,6 +261,12 @@ class MessagePoller:
                        prefix_wxid: str, from_wxid: str) -> tuple[str, str]:
         """返回 (wxid, 展示名)。"""
         sender_id = r.get("sender_id")
+
+        # 微信 4.x：real_sender_id == 1 表示自己发送的消息（此时 wechatauto
+        # 的 sender_username 可能映射到错误的 wxid，必须优先按 sender_id 判定）
+        if sender_id == 1:
+            return self._self_wxid, self._self_name()
+
         lib_user = str(r.get("sender_username") or "")
         if lib_user.isdigit():          # 库映射失败的数字串，视为未解析
             lib_user = ""

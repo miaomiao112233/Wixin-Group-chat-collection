@@ -2,6 +2,7 @@
 """总结 Worker：串行消费总结队列，调用 DeepSeek 生成 docx（工作线程）。"""
 from __future__ import annotations
 
+import logging
 import queue
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
@@ -11,6 +12,20 @@ from app.core.archiver import Archiver
 from app.core.message_poller import MessagePoller
 from app.core.summary_service import summarize_group
 from app.state_store import StateStore
+
+
+class _SignalLogHandler(logging.Handler):
+    """把 logging 消息转发到 Qt 信号，让 OCR 等日志在 UI 可见。"""
+
+    def __init__(self, signal: Signal):
+        super().__init__(level=logging.INFO)
+        self._signal = signal
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._signal.emit(self.format(record))
+        except Exception:                          # noqa: BLE001
+            pass
 
 
 def _build_client(key: str, base_url: str, model: str,
@@ -55,6 +70,12 @@ class SummaryWorker(QObject):
         if self._client is None:
             self.log.emit("[提示] 未配置 AI 服务，总结将只含统计与文件清单"
                           "（在「设置」中选择服务商并填入 API Key）")
+
+        # 把 app.ocr 等日志转发到 UI 日志框
+        handler = _SignalLogHandler(self.log)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logging.getLogger("app.ocr").addHandler(handler)
+        logging.getLogger("app.ocr").setLevel(logging.INFO)
 
         timer = QTimer(self)
         timer.setInterval(500)

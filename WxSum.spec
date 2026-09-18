@@ -12,10 +12,18 @@ from PyInstaller.utils.hooks import collect_submodules
 # wechatauto 内部按字符串动态 import，必须显式收齐全部子模块
 hiddenimports = collect_submodules("wechatauto") + [
     "psutil", "lxml._elementpath", "zstandard",
+    "ctypes.wintypes",
 ]
 
-# 微信密钥扫描会 ctypes.windll，PyInstaller 自动检测会漏
-hiddenimports += ["ctypes.wintypes"]
+# 图片 OCR（RapidOCR + ONNX Runtime）运行时动态加载的模块
+try:
+    hiddenimports += collect_submodules("rapidocr_onnxruntime")
+except Exception:
+    pass
+try:
+    hiddenimports += collect_submodules("onnxruntime")
+except Exception:
+    pass
 
 
 a = Analysis(

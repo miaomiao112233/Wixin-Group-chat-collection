@@ -10,7 +10,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt
 
 from app.config import DOCX_FONT
-from app.models import SummaryResult
+from app.models import Message, SummaryResult
 from app.summary.pipeline import Stats
 
 _STATUS_LABEL = {"archived": "已归档", "missing": "未下载",
@@ -53,8 +53,8 @@ def _table(doc: Document, headers: list[str],
 
 
 def build_docx(group_name: str, date: str, stats: Stats,
-               result: SummaryResult, files: list[dict],
-               out_path: Path) -> Path:
+               result: SummaryResult, files: list[dict], out_path: Path,
+               messages: list[Message] | None = None) -> Path:
     doc = Document()
 
     _h1(doc, f"{group_name} 群聊总结")
@@ -118,6 +118,17 @@ def build_docx(group_name: str, date: str, stats: Stats,
     if result.partial_failed:
         p = doc.add_paragraph()
         _set_font(p.add_run("注：AI 摘要部分失败，本文档由可用块拼接生成。"), 9)
+
+    # 六、群聊原话记录（完整保留当天消息原文，便于核对）
+    if messages:
+        doc.add_page_break()
+        _h2(doc, "六、群聊原话记录")
+        for m in messages:
+            p = doc.add_paragraph()
+            _set_font(
+                p.add_run(
+                    f"[{m.create_time:%H:%M:%S}] {m.sender_name}: {m.content}"),
+                9.5)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)

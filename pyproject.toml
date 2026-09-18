@@ -11,6 +11,8 @@ dependencies = [
     "lxml>=5.0",
     "zstandard>=0.22",
     "psutil>=5.9",
+    "rapidocr-onnxruntime>=1.2",
+    "imageio-ffmpeg>=0.4.9",
 ]
 
 [project.optional-dependencies]

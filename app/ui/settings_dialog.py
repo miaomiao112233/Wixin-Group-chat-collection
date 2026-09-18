@@ -10,8 +10,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog,
                                QToolButton, QVBoxLayout)
 
 from app.config import (AI_PROVIDERS, get_ai_config, get_auto_archive,
-                        get_wechat_data_dir, normalize_wechat_dir,
-                        save_ai_config, save_auto_archive,
+                        get_ocr_enabled, get_wechat_data_dir,
+                        normalize_wechat_dir, save_ai_config,
+                        save_auto_archive, save_ocr_enabled,
                         save_wechat_data_dir)
 
 _DIALOG_QSS = """
@@ -73,6 +74,7 @@ class SettingsDialog(QDialog):
         self._ai_changed = False
         self._wechat_dir_changed = False
         self._archive_changed = False
+        self._ocr_changed = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
@@ -161,6 +163,15 @@ class SettingsDialog(QDialog):
         self.chk_archive.toggled.connect(
             lambda: setattr(self, "_archive_changed", True))
         layout.addWidget(self.chk_archive)
+
+        # ---- 图片 OCR 开关 ----
+        self.chk_ocr = QCheckBox(
+            "对群聊图片做文字识别(OCR)后喂给 AI 总结"
+            "（需微信已登录，首次识别稍慢，结果本地缓存）")
+        self.chk_ocr.setChecked(get_ocr_enabled())
+        self.chk_ocr.toggled.connect(
+            lambda: setattr(self, "_ocr_changed", True))
+        layout.addWidget(self.chk_ocr)
 
         layout.addStretch(1)
 
@@ -274,6 +285,8 @@ class SettingsDialog(QDialog):
             save_wechat_data_dir(self.edit_dir.text().strip())
         if self._archive_changed:
             save_auto_archive(self.chk_archive.isChecked())
+        if self._ocr_changed:
+            save_ocr_enabled(self.chk_ocr.isChecked())
         QMessageBox.information(self, "已保存", "设置已保存。")
         self.accept()
 

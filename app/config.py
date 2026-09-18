@@ -174,8 +174,8 @@ def get_wechat_data_dir() -> str:
 
 
 def get_auto_archive() -> bool:
-    """是否自动归档群文件到 输出\\群名\\日期\\ 下；默认开启。"""
-    return bool(_CONFIG_JSON.get("auto_archive", True))
+    """是否自动归档群文件到 输出\\群名\\日期\\ 下；默认关闭。"""
+    return bool(_CONFIG_JSON.get("auto_archive", False))
 
 
 def save_auto_archive(enabled: bool) -> None:
@@ -187,6 +187,25 @@ def save_auto_archive(enabled: bool) -> None:
     except Exception:
         data = {}
     data["auto_archive"] = bool(enabled)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+    _CONFIG_JSON = data
+
+
+def get_ocr_enabled() -> bool:
+    """是否对图片消息做 OCR 提取文字后喂给 AI；默认开启。"""
+    return bool(_CONFIG_JSON.get("ocr_enabled", True))
+
+
+def save_ocr_enabled(enabled: bool) -> None:
+    """写入图片 OCR 开关。"""
+    global _CONFIG_JSON
+    p = DATA_DIR / "config.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        data = {}
+    data["ocr_enabled"] = bool(enabled)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                  encoding="utf-8")
     _CONFIG_JSON = data

@@ -46,6 +46,17 @@ def summarize_group(db, poller: MessagePoller, archiver: Archiver,
     # 2) 统计概览（纯代码）
     stats = compute_stats(messages, group_name, the_date, files)
 
+    # 2.5) 图片 OCR：把图片里的文字提取出来拼进 content，让 AI 能处理
+    from app.config import get_ocr_enabled
+    if get_ocr_enabled():
+        try:
+            from app.core.image_ocr import enrich_image_messages
+            enrich_image_messages(db, messages)
+        except Exception as e:                      # noqa: BLE001
+            import logging
+            logging.getLogger("app.ocr").warning(
+                "图片 OCR 阶段异常，跳过: %s", e)
+
     # 3) AI 总结
     if client is None:
         result = SummaryResult()
@@ -54,6 +65,7 @@ def summarize_group(db, poller: MessagePoller, archiver: Archiver,
 
     # 4) Word 排版
     out = (output_root / safe_name(group_name) / the_date / "群聊总结.docx")
-    build_docx(group_name, the_date, stats, result, files, out)
+    build_docx(group_name, the_date, stats, result, files, out,
+               messages=messages)
     store.mark_summaried(chatroom_id, str(out))
     return out

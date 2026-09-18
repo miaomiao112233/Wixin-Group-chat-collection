@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 build/
 dist/
+wechatauto_logs/
 # PyInstaller 默认产物
 *.spec.bak
 # IDE / 编辑器

@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self._really_quitting = False
         self._status_by_chatroom: dict[str, dict] = {}
         self._cards: dict[str, GroupCard] = {}
+        self._empty_tip: QLabel | None = None
         self._connect_dlg_open = False
 
         self._build_ui()
@@ -164,6 +165,11 @@ class MainWindow(QMainWindow):
             card.setParent(None)
             card.deleteLater()
         self._cards.clear()
+        # 移除上一次的空态提示（如有）
+        if getattr(self, "_empty_tip", None) is not None:
+            self._empty_tip.setParent(None)
+            self._empty_tip.deleteLater()
+            self._empty_tip = None
         for i, g in enumerate(groups):
             card = GroupCard(g, self._status_by_chatroom.get(g["chatroom_id"]))
             card.toggled.connect(self._on_group_toggle)
@@ -179,6 +185,7 @@ class MainWindow(QMainWindow):
             tip.setAlignment(Qt.AlignCenter)
             tip.setStyleSheet("color:#9AA4AE; font-size:14px;")
             self.grid.addWidget(tip, 0, 0, 1, 3)
+            self._empty_tip = tip
 
     def _card(self, chatroom: str) -> GroupCard | None:
         return self._cards.get(chatroom)
