@@ -34,15 +34,20 @@ class TrayIcon(QSystemTrayIcon):
         menu = QMenu()
         act_show = QAction("显示主窗口", menu)
         act_sum = QAction("手动总结全部群", menu)
+        act_update = QAction("检查更新", menu)
         act_quit = QAction("退出程序", menu)
         menu.addAction(act_show)
         menu.addAction(act_sum)
+        menu.addSeparator()
+        menu.addAction(act_update)
         menu.addSeparator()
         menu.addAction(act_quit)
         self.setContextMenu(menu)
 
         act_show.triggered.connect(self._win.show_and_raise)
         act_sum.triggered.connect(self._win.manual_summary_all)
+        act_update.triggered.connect(
+            lambda: self._win.check_update(manual=True))
         act_quit.triggered.connect(self._win.really_quit)
         self.activated.connect(self._on_activated)
 

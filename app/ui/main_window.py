@@ -8,17 +8,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHBoxLayout,
                                QLabel, QMainWindow, QMessageBox,
                                QPlainTextEdit, QPushButton, QScrollArea,
                                QSystemTrayIcon, QVBoxLayout, QWidget)
 
+from app.config import APP_VERSION, get_skip_version
 from app.state_store import StateStore
 from app.ui.group_card import GroupCard
 from app.ui.group_dialog import GroupDialog
 from app.ui.settings_dialog import SettingsDialog
 from app.ui.tray import TrayIcon
+from app.ui.update_dialog import CheckThread, UpdateDialog
 from app.workers.monitor_worker import MonitorWorker
 from app.workers.summary_worker import SummaryWorker
 
@@ -68,6 +70,10 @@ class MainWindow(QMainWindow):
         self._tray = TrayIcon(self)
         self._tray.show()
         self.refresh_cards()
+        # 启动 6 秒后静默检查更新（让主界面先就绪；网络失败不打扰）
+        self._check_thread: CheckThread | None = None
+        self._update_dlg: UpdateDialog | None = None
+        QTimer.singleShot(6000, lambda: self.check_update(manual=False))
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -267,6 +273,58 @@ class MainWindow(QMainWindow):
         for g in self._store.list_groups(enabled_only=True):
             self._sum.submit(g["chatroom_id"], g["group_name"])
         self.show_and_raise()
+
+    # ---------- 自动更新 ----------
+    def check_update(self, manual: bool = False):
+        """检查 GitHub Release。manual=True（托盘触发）时给出全部反馈。"""
+        # 已有检查在跑 / 更新对话框开着时不重复
+        if self._check_thread and self._check_thread.isRunning():
+            return
+        if self._update_dlg is not None:
+            return
+        if manual:
+            self.append_log("正在检查更新…")
+        self._check_thread = CheckThread(self)
+        self._check_thread.ok.connect(
+            lambda info: self._on_check_result(info, manual))
+        self._check_thread.error.connect(
+            lambda msg: self._on_check_error(msg, manual))
+        self._check_thread.start()
+
+    def _on_check_result(self, info, manual: bool):
+        from app.core import updater
+        newer = updater.is_newer(info.version, APP_VERSION)
+        if not newer:
+            if manual:
+                QMessageBox.information(
+                    self, "检查更新",
+                    f"当前已是最新版本（v{APP_VERSION}）。")
+            return
+        if info.version == get_skip_version():
+            if manual:
+                # 手动检查时即使跳过过也展示
+                self._show_update_dialog(info)
+            return
+        self.append_log(f"发现新版本 {info.tag}")
+        self._show_update_dialog(info)
+
+    def _show_update_dialog(self, info):
+        dlg = UpdateDialog(info, self)
+        self._update_dlg = dlg
+        dlg.finished.connect(self._on_update_dlg_closed)
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_update_dlg_closed(self):
+        self._update_dlg = None
+
+    def _on_check_error(self, msg: str, manual: bool):
+        if manual:
+            QMessageBox.warning(
+                self, "检查更新失败",
+                f"{msg}\n\n请检查网络后重试（需能访问 github.com）。")
+            self.append_log(f"检查更新失败: {msg}")
 
     # ---------- 状态回调 ----------
     def _on_status(self, data: dict):

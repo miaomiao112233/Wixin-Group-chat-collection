@@ -37,6 +37,10 @@ def _runtime_paths() -> tuple[Path, Path, Path, Path]:
 PROJECT_ROOT, DATA_DIR, LOGS_DIR, OUTPUT_DIR = _runtime_paths()
 STATE_DB = DATA_DIR / "state.db"
 
+# ---------- 版本 / 自动更新 ----------
+APP_VERSION = "1.2.0"          # 发版前维护；与 GitHub Release tag 对齐
+GITHUB_REPO = "miaomiao112233/Wixin-Group-chat-collection"
+
 # ---------- 微信解密缓存 ----------
 # 采集线程与总结线程各持一个 WeChatDB 实例，必须使用各自独立的解密副本
 # 目录：两者并发执行 WAL 增量合并/全量重建时，若共用同一批缓存文件，
@@ -206,6 +210,28 @@ def save_ocr_enabled(enabled: bool) -> None:
     except Exception:
         data = {}
     data["ocr_enabled"] = bool(enabled)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+    _CONFIG_JSON = data
+
+
+def get_skip_version() -> str:
+    """用户选择"跳过此版本"的版本号；空串=不跳过。"""
+    return str(_CONFIG_JSON.get("skip_update_version") or "").strip()
+
+
+def save_skip_version(version: str) -> None:
+    """写入/清除跳过的更新版本号。"""
+    global _CONFIG_JSON
+    p = DATA_DIR / "config.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        data = {}
+    if version:
+        data["skip_update_version"] = version
+    else:
+        data.pop("skip_update_version", None)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
                  encoding="utf-8")
     _CONFIG_JSON = data
