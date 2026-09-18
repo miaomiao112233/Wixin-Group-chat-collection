@@ -1,0 +1,16 @@
+.venv/
+.trae/
+data/
+logs/
+输出/
+dbcache/
+__pycache__/
+*.pyc
+build/
+dist/
+# PyInstaller 默认产物
+*.spec.bak
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
