@@ -52,17 +52,23 @@ Name: "chinesesimp"; MessagesFile: "installer\ChineseSimplified.isl"
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式(&D)"; GroupDescription: "附加图标:"
 
+[Dirs]
+; 安装即建好输出目录，桌面"输出文件夹"快捷方式不会指向不存在的路径
+Name: "{app}\输出"
+
 [Files]
 Source: "dist\WxSum\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
 Name: "{group}\WxSum"; Filename: "{app}\WxSum.exe"
 Name: "{group}\卸载 WxSum"; Filename: "{uninstallexe}"
+Name: "{group}\WxSum 输出文件夹"; Filename: "{app}\输出"
 Name: "{autodesktop}\WxSum"; Filename: "{app}\WxSum.exe"; Tasks: desktopicon
+Name: "{autodesktop}\WxSum 输出文件夹"; Filename: "{app}\输出"; Tasks: desktopicon; Comment: "打开 WxSum 生成的 Word 总结与归档文件"
 
 [Run]
 Filename: "{app}\WxSum.exe"; Description: "立即启动 WxSum"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; 仅清理程序运行产生的空目录，不碰 %LOCALAPPDATA%\WxSum 用户数据
-Type: filesandordirs; Name: "{app}\输出"
+; 只在输出目录为空时删除；有用户生成的 Word/归档则保留，避免卸载误删文档
+Type: dirifempty; Name: "{app}\输出"
