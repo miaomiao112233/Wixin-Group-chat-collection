@@ -77,9 +77,8 @@ def main() -> None:
         ctl.on_round(n)
         print(f"  新增 {n:>3} -> 间隔 {ctl.interval_sec/60:.1f}min, "
               f"下次 {ctl.next_run_time():%H:%M}")
-    print(f"  强制点检查(今天已总结=False) -> "
-          f"{ctl.should_force_summary(None)}; "
-          f"下次强制时刻 {ctl.next_force_time():%m-%d %H:%M}")
+    print(f"  下次强制时刻 {ctl.next_force_time():%m-%d %H:%M}"
+          "（强制触发由 MonitorWorker 按绝对时刻排程，不在本控制器内）")
 
     # ---- state.db 落库结果 ----
     print("\n[state.db] monitor_group:")

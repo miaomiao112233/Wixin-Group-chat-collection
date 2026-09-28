@@ -150,7 +150,7 @@ class MainWindow(QMainWindow):
         self._mon.connect_failed.connect(self._on_connect_failed)
         self._mon.connected.connect(self._on_connected)
         self._mon.ask_summary.connect(
-            lambda c, n: self._sum.submit(c, n))
+            lambda c, n, d: self._sum.submit(c, n, d))
 
         self._sum_thread = QThread(self)
         self._sum = SummaryWorker(self._store)
@@ -236,7 +236,7 @@ class MainWindow(QMainWindow):
         if dlg.exec() == SettingsDialog.Accepted:
             ai = dlg.ai_config()
             if ai is not None:
-                self._sum.set_ai_config(*ai)
+                self._sum.ai_config_set.emit(*ai)
                 self.append_log("AI 服务配置已更新")
             if dlg.wechat_dir_changed():
                 self.append_log("微信数据目录设置已变更，正在重连…")
@@ -262,10 +262,10 @@ class MainWindow(QMainWindow):
             box.addButton("打开设置", QMessageBox.ActionRole)
             box.exec()
             if box.clickedButton() is btn_retry:
-                self._mon.reconnect()
+                self._mon.request_reconnect.emit()
             else:
                 if self._on_settings():
-                    self._mon.reconnect()
+                    self._mon.request_reconnect.emit()
         finally:
             self._connect_dlg_open = False
 
@@ -344,8 +344,8 @@ class MainWindow(QMainWindow):
             card.mark_summaried()
         self._tray.showMessage("总结完成", path,
                                QSystemTrayIcon.Information, 3000)
-        # 刚总结完，重置自动总结倒计时（跨线程 Slot 自动排队）
-        self._mon.restart_summary_schedule()
+        # 刚总结完，重置自动总结倒计时（经信号排队到采集线程执行）
+        self._mon.reschedule_requested.emit()
 
     def _on_summary_failed(self, chatroom: str, err: str):
         self._tray.showMessage("总结失败", err[:120],

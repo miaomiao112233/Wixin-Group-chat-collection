@@ -32,40 +32,50 @@ def summarize_group(db, poller: MessagePoller, archiver: Archiver,
     if not messages:
         return None
     the_date = f"{messages[0].create_time:%Y-%m-%d}"
+    # summary_run 落库：记录区间/条数/状态，供历史查询与失败排查
+    run_id = store.start_summary_run(
+        chatroom_id, the_date, int(messages[0].sort_seq))
+    try:
+        # 1) 文件归档（去重，登记 state.db；启用日前的历史文件不归档）；
+        #    用户在设置中整体关闭归档时跳过（但文件清单仍从历史登记里读）
+        since_date = (store.get_group(chatroom_id) or {}).get(
+            "monitor_start_date")
+        from app.config import get_auto_archive
+        if get_auto_archive():
+            archiver.archive_messages(messages, output_root, group_name,
+                                      since_date=since_date)
+        files = archiver.list_group_files(chatroom_id, the_date)
 
-    # 1) 文件归档（去重，登记 state.db；启用日前的历史文件不归档）；
-    #    用户在设置中整体关闭归档时跳过（但文件清单仍从历史登记里读）
-    since_date = (store.get_group(chatroom_id) or {}).get(
-        "monitor_start_date")
-    from app.config import get_auto_archive
-    if get_auto_archive():
-        archiver.archive_messages(messages, output_root, group_name,
-                                  since_date=since_date)
-    files = archiver.list_group_files(chatroom_id, the_date)
+        # 2) 统计概览（纯代码）
+        stats = compute_stats(messages, group_name, the_date, files)
 
-    # 2) 统计概览（纯代码）
-    stats = compute_stats(messages, group_name, the_date, files)
+        # 2.5) 图片 OCR：把图片里的文字提取出来拼进 content，让 AI 能处理
+        from app.config import get_ocr_enabled
+        if get_ocr_enabled():
+            try:
+                from app.core.image_ocr import enrich_image_messages
+                enrich_image_messages(db, messages)
+            except Exception as e:                  # noqa: BLE001
+                import logging
+                logging.getLogger("app.ocr").warning(
+                    "图片 OCR 阶段异常，跳过: %s", e)
 
-    # 2.5) 图片 OCR：把图片里的文字提取出来拼进 content，让 AI 能处理
-    from app.config import get_ocr_enabled
-    if get_ocr_enabled():
-        try:
-            from app.core.image_ocr import enrich_image_messages
-            enrich_image_messages(db, messages)
-        except Exception as e:                      # noqa: BLE001
-            import logging
-            logging.getLogger("app.ocr").warning(
-                "图片 OCR 阶段异常，跳过: %s", e)
+        # 3) AI 总结
+        if client is None:
+            result = SummaryResult()
+        else:
+            result = summarize(client, group_name, messages, stats)
 
-    # 3) AI 总结
-    if client is None:
-        result = SummaryResult()
-    else:
-        result = summarize(client, group_name, messages, stats)
-
-    # 4) Word 排版
-    out = (output_root / safe_name(group_name) / the_date / "群聊总结.docx")
-    build_docx(group_name, the_date, stats, result, files, out,
-               messages=messages)
+        # 4) Word 排版
+        out = (output_root / safe_name(group_name) / the_date
+               / "群聊总结.docx")
+        build_docx(group_name, the_date, stats, result, files, out,
+                   messages=messages)
+    except Exception:
+        store.finish_summary_run(run_id, int(messages[-1].sort_seq),
+                                 len(messages), "failed")
+        raise
+    store.finish_summary_run(run_id, int(messages[-1].sort_seq),
+                             len(messages), "done", str(out))
     store.mark_summaried(chatroom_id, str(out))
     return out

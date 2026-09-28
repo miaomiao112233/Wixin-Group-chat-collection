@@ -45,16 +45,18 @@ class SummaryWorker(QObject):
     log = Signal(str)
     done = Signal(str, str)      # chatroom_id, docx_path
     failed = Signal(str, str)    # chatroom_id, error
+    ai_config_set = Signal(str, str, str, bool)   # UI 保存设置后触发热更新
 
     def __init__(self, store: StateStore):
         super().__init__()
         self._store = store
-        self._q: queue.Queue[tuple[str, str] | None] = queue.Queue()
+        self._q: queue.Queue[tuple[str, str, str] | None] = queue.Queue()
         self._db = None
         self._poller: MessagePoller | None = None
         self._archiver: Archiver | None = None
         self._client = None
-        self._ai_error_notified = False
+        # UI 线程触达本线程必须走信号：直接方法调用会在 UI 线程执行
+        self.ai_config_set.connect(self.set_ai_config)
 
     @Slot()
     def start_work(self):
@@ -85,18 +87,18 @@ class SummaryWorker(QObject):
     def stop(self):
         self._q.put(None)
 
-    @Slot(str, str)
-    def submit(self, chatroom_id: str, group_name: str):
-        self._q.put((chatroom_id, group_name))
+    @Slot(str, str, str)
+    def submit(self, chatroom_id: str, group_name: str, day_str: str = ""):
+        """入队一次总结；day_str 非空（YYYY-MM-DD）时补发指定日，空=今天。"""
+        self._q.put((chatroom_id, group_name, day_str))
 
     @Slot(str, str, str, bool)
     def set_ai_config(self, key: str, base_url: str, model: str,
                       disable_thinking: bool = False):
-        """设置界面保存后热更新 AI 配置（跨线程 Slot 自动排队）。"""
+        """设置界面保存后热更新 AI 配置（经信号排队到本线程执行）。"""
         client = _build_client(key, base_url, model, disable_thinking)
         if client is not None:
             self._client = client
-            self._ai_error_notified = False
             local = ("://localhost" in base_url) or ("://127.0.0.1" in base_url)
             self.log.emit("AI 总结已启用（本地服务）" if local and not key
                           else "AI 总结已启用")
@@ -113,24 +115,38 @@ class SummaryWorker(QObject):
                 return
             if item is None:
                 return
-            chatroom, name = item
-            self._summarize_one(chatroom, name)
+            chatroom, name, day_str = item
+            self._summarize_one(chatroom, name, day_str)
 
-    def _summarize_one(self, chatroom: str, name: str):
+    @staticmethod
+    def _parse_day(day_str: str):
+        """"YYYY-MM-DD" → date；空/非法返回 None（=今天）。"""
+        if not day_str:
+            return None
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(day_str, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def _summarize_one(self, chatroom: str, name: str, day_str: str = ""):
         if self._poller is None:
             return
         try:
             self.log.emit(f"[{name}] 开始生成总结…")
             out = summarize_group(self._db, self._poller, self._archiver,
                                   self._store, self._client,
-                                  chatroom, name, None, OUTPUT_DIR)
+                                  chatroom, name, self._parse_day(day_str),
+                                  OUTPUT_DIR)
             if out is None:
                 self.log.emit(f"[{name}] 当日无消息，跳过总结")
                 return
             self.done.emit(chatroom, str(out))
             self.log.emit(f"[{name}] 总结完成: {out}")
         except Exception as e:                          # noqa: BLE001
+            try:
+                self._store.log_error("ERROR", "summary", f"{name}: {e}")
+            except Exception:                           # noqa: BLE001
+                pass
             self.failed.emit(chatroom, str(e))
             self.log.emit(f"[错误] 总结 {name} 失败: {e}")
-            if self._client is not None and not self._ai_error_notified:
-                self._ai_error_notified = True

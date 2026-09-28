@@ -130,6 +130,23 @@ def _load_config_json() -> dict:
 _CONFIG_JSON = _load_config_json()
 
 
+def _apply_config_update(mutate) -> None:
+    """读 config.json → mutate(data) 原地修改 → 写回并刷新内存缓存。
+
+    各 save_* 共用的样板；单进程内串行调用，无需加锁。
+    """
+    global _CONFIG_JSON
+    p = DATA_DIR / "config.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        data = {}
+    mutate(data)
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                 encoding="utf-8")
+    _CONFIG_JSON = data
+
+
 def get_deepseek_api_key() -> str:
     """优先环境变量，其次 data/config.json 的 deepseek_api_key 字段。"""
     return (
@@ -151,25 +168,20 @@ def get_ai_config() -> tuple[str, str, str, bool]:
 def save_ai_config(key: str, base_url: str, model: str,
                    disable_thinking: bool = False) -> None:
     """统一写入 AI 配置（key 字段名沿用 deepseek_api_key 以兼容旧配置）。"""
-    global _CONFIG_JSON
-    p = DATA_DIR / "config.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    except Exception:
-        data = {}
     key = (key or "").strip()
     base_url = (base_url or "").strip().rstrip("/")
     model = (model or "").strip()
-    if key:
-        data["deepseek_api_key"] = key
-    else:
-        data.pop("deepseek_api_key", None)
-    data["ai_base_url"] = base_url
-    data["ai_model"] = model
-    data["ai_thinking_disabled"] = bool(disable_thinking)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _CONFIG_JSON = data
+
+    def _mutate(data: dict) -> None:
+        if key:
+            data["deepseek_api_key"] = key
+        else:
+            data.pop("deepseek_api_key", None)
+        data["ai_base_url"] = base_url
+        data["ai_model"] = model
+        data["ai_thinking_disabled"] = bool(disable_thinking)
+
+    _apply_config_update(_mutate)
 
 
 def get_wechat_data_dir() -> str:
@@ -184,16 +196,9 @@ def get_auto_archive() -> bool:
 
 def save_auto_archive(enabled: bool) -> None:
     """写入自动归档开关。"""
-    global _CONFIG_JSON
-    p = DATA_DIR / "config.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    except Exception:
-        data = {}
-    data["auto_archive"] = bool(enabled)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _CONFIG_JSON = data
+    def _mutate(data: dict) -> None:
+        data["auto_archive"] = bool(enabled)
+    _apply_config_update(_mutate)
 
 
 def get_ocr_enabled() -> bool:
@@ -203,16 +208,9 @@ def get_ocr_enabled() -> bool:
 
 def save_ocr_enabled(enabled: bool) -> None:
     """写入图片 OCR 开关。"""
-    global _CONFIG_JSON
-    p = DATA_DIR / "config.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    except Exception:
-        data = {}
-    data["ocr_enabled"] = bool(enabled)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _CONFIG_JSON = data
+    def _mutate(data: dict) -> None:
+        data["ocr_enabled"] = bool(enabled)
+    _apply_config_update(_mutate)
 
 
 def get_skip_version() -> str:
@@ -222,37 +220,24 @@ def get_skip_version() -> str:
 
 def save_skip_version(version: str) -> None:
     """写入/清除跳过的更新版本号。"""
-    global _CONFIG_JSON
-    p = DATA_DIR / "config.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    except Exception:
-        data = {}
-    if version:
-        data["skip_update_version"] = version
-    else:
-        data.pop("skip_update_version", None)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _CONFIG_JSON = data
+    def _mutate(data: dict) -> None:
+        if version:
+            data["skip_update_version"] = version
+        else:
+            data.pop("skip_update_version", None)
+    _apply_config_update(_mutate)
 
 
 def save_wechat_data_dir(path: str) -> None:
     """写入/清除微信数据目录覆盖（空串=恢复自动检测）。"""
-    global _CONFIG_JSON
-    p = DATA_DIR / "config.json"
-    try:
-        data = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
-    except Exception:
-        data = {}
     path = (path or "").strip()
-    if path:
-        data["wechat_data_dir"] = path
-    else:
-        data.pop("wechat_data_dir", None)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _CONFIG_JSON = data
+
+    def _mutate(data: dict) -> None:
+        if path:
+            data["wechat_data_dir"] = path
+        else:
+            data.pop("wechat_data_dir", None)
+    _apply_config_update(_mutate)
 
 
 def normalize_wechat_dir(picked: str) -> str | None:

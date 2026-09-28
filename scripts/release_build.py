@@ -44,6 +44,8 @@ REQUIRED_MODULES = (
 )
 
 _VER_RE = re.compile(r'^APP_VERSION\s*=\s*"(\d+\.\d+\.\d+)"', re.M)
+_PYPROJECT = ROOT / "pyproject.toml"
+_PYPROJECT_VER_RE = re.compile(r'(?m)^(version\s*=\s*)"[^"]+"')
 
 
 def fail(msg: str) -> "None":
@@ -61,11 +63,21 @@ def read_version() -> str:
 def bump_version(new: str) -> None:
     text = CONFIG_PY.read_text(encoding="utf-8")
     if not _VER_RE.search(text):
-        fail("无法写回 APP_VERSION（正则不匹配）")
+        fail("app/config.py 中找不到 APP_VERSION = \"x.y.z\"")
     CONFIG_PY.write_text(
         _VER_RE.sub(f'APP_VERSION = "{new}"', text, count=1),
         encoding="utf-8")
     print(f"[1] APP_VERSION 已改为 {new}")
+    # 同步 pyproject.toml 的 version，避免两处版本号漂移
+    try:
+        pp = _PYPROJECT.read_text(encoding="utf-8")
+        if _PYPROJECT_VER_RE.search(pp):
+            _PYPROJECT.write_text(
+                _PYPROJECT_VER_RE.sub(rf'\g<1>"{new}"', pp, count=1),
+                encoding="utf-8")
+            print(f"    pyproject.toml version 已同步为 {new}")
+    except OSError as e:
+        print(f"    [警告] pyproject.toml 同步失败: {e}")
 
 
 def run_build() -> None:

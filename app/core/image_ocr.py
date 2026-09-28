@@ -27,6 +27,8 @@ log = logging.getLogger("app.ocr")
 _CACHE_FILE = DATA_DIR / "ocr_cache.json"
 # 缩略图判定阈值：任一边小于此值视为缩略图，需放大后再 OCR
 _THUMB_PX = 400
+# 缓存条目上限：图片识别结果只会增不会变，超限按写入先后淘汰最旧
+_MAX_CACHE_ENTRIES = 3000
 
 
 class ImageOCR:
@@ -94,6 +96,9 @@ class ImageOCR:
         # 等用户在微信点开大图后下次总结可重试
         if text:
             self._cache[key] = text
+            while len(self._cache) > _MAX_CACHE_ENTRIES:
+                # dict 保插入序，弹最早写入的一条
+                self._cache.pop(next(iter(self._cache)))
             self._save_cache()
         else:
             log.info("图片 %s OCR 无文字（可能仅缩略图，"

@@ -1,10 +1,13 @@
 [project]
 name = "wxsum"
-version = "1.0.0"
+# 发版脚本（release_build.py）升版时会按 APP_VERSION 同步此处；勿单独手改
+version = "1.2.0"
 description = "微信群消息监控 + AI 滚动总结 + 文件自动归档"
 requires-python = ">=3.12"
 dependencies = [
-    "wechatauto-replica>=1.2.2",
+    # 项目依赖 wechatauto 私有 API（_locate_account_root/_db._open 等），
+    # 锁定主版本防上游破坏性变更
+    "wechatauto-replica>=1.2.2,<2",
     "PySide6>=6.7",
     "python-docx>=1.1",
     "httpx>=0.27",

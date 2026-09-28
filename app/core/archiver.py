@@ -223,8 +223,24 @@ class Archiver:
         return str(dest)
 
 
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def safe_name(name: str) -> str:
-    """文件系统安全的目录名。"""
+    """文件系统安全的目录名。
+
+    群名来自微信库（可被外部影响）：除替换非法字符外，还须防
+    ".." 之类的目录穿越与 Windows 保留设备名/结尾点空格。
+    """
     for ch in '\\/:*?"<>|':
         name = name.replace(ch, "_")
-    return name.strip() or "未知群"
+    name = name.strip().rstrip(". ")
+    if not name:
+        return "未知群"
+    if name.upper() in _WINDOWS_RESERVED:
+        name = f"_{name}"
+    return name

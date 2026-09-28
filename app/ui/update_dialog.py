@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QProgressBar,
                                QPushButton, QTextEdit, QVBoxLayout,
                                QMessageBox)
 
-from app.config import APP_VERSION, save_skip_version
+from app.config import APP_VERSION, GITHUB_REPO, save_skip_version
 from app.core import updater
 from app.core.updater import ReleaseInfo
 
@@ -174,8 +174,7 @@ class UpdateDialog(QDialog):
         if not self._release.url:
             # Release 未挂 zip：引导到下载页
             QDesktopServices.openUrl(
-                QUrl("https://github.com/miaomiao112233/"
-                     "Wixin-Group-chat-collection/releases/latest"))
+                QUrl(f"https://github.com/{GITHUB_REPO}/releases/latest"))
             self.reject()
             return
         self._enter_download_mode()

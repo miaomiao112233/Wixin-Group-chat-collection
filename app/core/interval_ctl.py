@@ -62,23 +62,3 @@ class IntervalController:
         if t <= now:
             t += timedelta(days=1)
         return t
-
-    def should_force_summary(self, last_summary_at: str | None,
-                             now: datetime | None = None) -> bool:
-        """今日 23:30 已过且今天还没总结过 → 强制。
-
-        last_summary_at 格式 "%Y-%m-%d %H:%M:%S"（state.db 存储格式）。
-        """
-        now = now or datetime.now()
-        hh, mm = self.force_time.split(":")
-        cutoff = now.replace(hour=int(hh), minute=int(mm),
-                             second=0, microsecond=0)
-        if now < cutoff:
-            return False
-        if not last_summary_at:
-            return True
-        try:
-            last = datetime.strptime(last_summary_at, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return True
-        return last.date() < now.date()

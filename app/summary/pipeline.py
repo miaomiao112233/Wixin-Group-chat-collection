@@ -137,9 +137,10 @@ def summarize(client: DeepSeekClient, group_name: str,
     block_results: list[SummaryResult] = []
     failed = 0
     for i, block in enumerate(blocks, 1):
-        prompt = MAP_PROMPT + f"（第{i}/{len(blocks)}块）\n" + block
+        # 指令已在 system 消息里，user 侧只放分块正文，避免整段 prompt 翻倍
+        user_text = f"（第{i}/{len(blocks)}块）\n{block}"
         try:
-            text = client.chat(MAP_PROMPT, prompt)
+            text = client.chat(MAP_PROMPT, user_text)
         except Exception:
             failed += 1
             continue
@@ -150,7 +151,7 @@ def summarize(client: DeepSeekClient, group_name: str,
                 try:
                     text = client.chat(
                         MAP_PROMPT,
-                        prompt + "\n\n注意：你上次输出不是合法 JSON，"
+                        user_text + "\n\n注意：你上次输出不是合法 JSON，"
                                  "请严格只输出 JSON。")
                     data = _parse_json(text)
                     if data is not None:

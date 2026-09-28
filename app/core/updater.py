@@ -168,8 +168,10 @@ def apply_and_restart(zip_path: str) -> None:
 
     bat_dir = Path(tempfile.mkdtemp(prefix="wxsum_upd_"))
     bat_path = bat_dir / "update.bat"
+    # 与 bat 内 chcp 65001 对齐按 UTF-8 写入：失败弹窗的中文提示才不乱码；
+    # chcp 之前的行全是 ASCII，不受首行按系统代码页解析的影响
     bat_path.write_text(_build_bat(zip_path, app_dir, exe, pid),
-                        encoding="gbk", errors="replace")
+                        encoding="utf-8", errors="replace")
 
     import subprocess
     subprocess.Popen(

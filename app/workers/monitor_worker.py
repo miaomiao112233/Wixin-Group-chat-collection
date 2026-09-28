@@ -43,10 +43,12 @@ class MonitorWorker(QObject):
     log = Signal(str)
     status = Signal(dict)            # {chatroom: {name, new_count, last_msg}}
     next_summary_at = Signal(str)    # "HH:MM" 或 "明天 HH:MM"
-    ask_summary = Signal(str, str)   # chatroom_id, group_name
+    ask_summary = Signal(str, str, str)   # chatroom_id, group_name, 目标日(空=今天)
     connect_failed = Signal(str)     # 连接微信失败原因（UI 弹窗引导）
     connected = Signal()             # 连接成功（UI 恢复状态）
     request_poll = Signal()          # UI 添加群后请求立即轮询一次
+    request_reconnect = Signal()     # UI 请求重连（emit 排队到本线程执行）
+    reschedule_requested = Signal()  # UI 请求重排总结调度
 
     def __init__(self, store: StateStore):
         super().__init__()
@@ -59,10 +61,13 @@ class MonitorWorker(QObject):
         self._summary_timer: QTimer | None = None
         self._next_summary_ts: float = 0.0   # 下一次总结的绝对时间戳
         self._next_is_daily: bool = False    # 下一次是否为每日强制点
-        self._daily_done_date: str = ""
         # 今日消息计数（增量维护，避免每轮全量扫描大群）：
         # {chatroom: {"date": "YYYY-MM-DD", "count": int}}
         self._today_stat: dict[str, dict] = {}
+        # UI 线程触达本线程必须走信号：直接方法调用会在 UI 线程执行，
+        # 重连时的解密会卡界面（AutoConnection 按接收者所在线程自动排队）
+        self.request_reconnect.connect(self.reconnect)
+        self.reschedule_requested.connect(self.restart_summary_schedule)
 
     # ---------- 生命周期 ----------
     @Slot()
@@ -81,6 +86,7 @@ class MonitorWorker(QObject):
         except Exception as e:                          # noqa: BLE001
             self._db = self._poller = self._archiver = None
             hint = self._build_failure_hint(e)
+            self._log_error("connect", hint)
             self.log.emit(f"[错误] {hint}")
             self.connect_failed.emit(hint)
             return False
@@ -190,6 +196,7 @@ class MonitorWorker(QObject):
                                         "last_msg": preview}
                 total_new += len(msgs)
             except Exception as e:                      # noqa: BLE001
+                self._log_error("monitor", f"采集 {name} 失败: {e}")
                 self.log.emit(f"[错误] 采集 {name} 失败: {e}")
         # 全部群算完后只反馈一次，避免多群时间隔被重复放大
         self._ctl.on_round(total_new)
@@ -239,14 +246,22 @@ class MonitorWorker(QObject):
         if not groups:
             self._reschedule(now)         # 无监控群：顺延继续等
             return
+        # 错过触发点（睡眠/事件循环阻塞）且已跨午夜：按排程时的目标日
+        # 补总结而非"现在"，否则昨天 23:30 强制点/常规点会总结成新的一天，
+        # 前一天的尾巴消息永久漏总结
+        sched_day = datetime.fromtimestamp(self._next_summary_ts).date()
+        day_str = (f"{sched_day:%Y-%m-%d}"
+                   if sched_day != datetime.now().date() else "")
         is_daily = getattr(self, "_next_is_daily", False)
         for g in groups:
-            self.ask_summary.emit(g["chatroom_id"], g["group_name"])
-        log.info("到点触发自动总结，共 %d 个群%s", len(groups),
-                 "（每日强制）" if is_daily else "")
-        if is_daily:
-            self._daily_done_date = f"{datetime.now():%Y-%m-%d}"
-            self.log.emit("触发每日 23:30 强制总结")
+            self.ask_summary.emit(g["chatroom_id"], g["group_name"], day_str)
+        if day_str:
+            log.info("错过总结点，补发 %s 的总结，共 %d 个群",
+                     day_str, len(groups))
+            self.log.emit(f"错过总结点，补发 {day_str} 的总结")
+        else:
+            log.info("到点触发自动总结，共 %d 个群%s", len(groups),
+                     "（每日强制）" if is_daily else "")
         self._reschedule(now)
 
     @Slot()
@@ -257,4 +272,12 @@ class MonitorWorker(QObject):
     # ---------- 手动 ----------
     @Slot(str, str)
     def manual_summary(self, chatroom_id: str, group_name: str):
-        self.ask_summary.emit(chatroom_id, group_name)
+        self.ask_summary.emit(chatroom_id, group_name, "")
+
+    # ---------- 错误落库 ----------
+    def _log_error(self, module: str, message: str):
+        """错误写入 state.db 的 error_log（UI 日志之外留一份可查）。"""
+        try:
+            self._store.log_error("ERROR", module, message)
+        except Exception:                          # noqa: BLE001
+            pass

@@ -91,6 +91,16 @@ _TAG_RE = re.compile(r"<[^>]+>")
 # 消息正文前的发送者前缀：'wxid_xxx:\n内容'（不含协议 XML 时长度有限）
 _PREFIX_RE = re.compile(r"^([^:\n]{1,64}):\r?\n")
 
+# 按天扫描的分页参数：wechatauto.get_messages 每页内部都是全量读分片
+# 再排序切片，因此只有"目标窗口不在最新一页内"（当天消息 > 一页）才会
+# 翻页，正常成本与单次扫描相当；总量护栏防失控。
+_SCAN_PAGE_SIZE = 2000
+_SCAN_MAX_ROWS = 200_000
+
+# 群成员/昵称缓存有效期（秒）：长时间挂机后成员改名、新成员入群
+# 也能在下个周期生效，不必重启
+_MEMBER_CACHE_TTL_SEC = 30 * 60
+
 
 def _strip_tags(s: str, limit: int = 200) -> str:
     s = unescape(_TAG_RE.sub("", s or "")).strip()
@@ -107,6 +117,15 @@ class MessagePoller:
         self._self_name_cache: str = ""
         self._self_wxid: str = db.wxid
         self._name2id: dict[int, str] | None = None
+        self._cache_built_at: float = time.time()
+
+    def _refresh_stale_caches(self) -> None:
+        """成员/昵称缓存到期整体失效（Name2Id 映射稳定，不参与刷新）。"""
+        if time.time() - self._cache_built_at < _MEMBER_CACHE_TTL_SEC:
+            return
+        self._member_map.clear()
+        self._nick_cache.clear()
+        self._cache_built_at = time.time()
 
     # ---------- 对外 ----------
     def fetch_new(self, chatroom_id: str, since_seq: int,
@@ -123,8 +142,34 @@ class MessagePoller:
             what=f"定位游标 {chatroom_id}")
         return int(msgs[0]["sort_seq"]) if msgs else 0
 
-    def day_start_seq(self, chatroom_id: str, day=None,
-                      scan_limit: int = 2000) -> int:
+    def _scan_until_day_start(self, chatroom_id: str, day) -> list[dict]:
+        """从最新消息起分页向历史方向扫描，直到越过 day 的 0 点。
+
+        返回的行按 sort_seq 降序，包含 day 当天全部消息及其后一条更旧的
+        消息；不传 day 时由调用方自行决定停止条件没有意义，本方法固定
+        以"当天 0 点"为界。只依赖公开 API（get_messages offset 分页）。
+        """
+        day_start = datetime(day.year, day.month, day.day).timestamp()
+
+        def _stop(oldest: dict) -> bool:
+            return int(oldest["create_time"]) < day_start
+
+        rows: list[dict] = []
+        offset = 0
+        while offset < _SCAN_MAX_ROWS:
+            batch = db_call_with_retry(
+                lambda o=offset: self._db.get_messages(
+                    chatroom_id, limit=_SCAN_PAGE_SIZE, offset=o),
+                what=f"按天扫描 {chatroom_id}")
+            if not batch:
+                break
+            rows.extend(batch)
+            if _stop(batch[-1]):
+                break
+            offset += len(batch)
+        return rows
+
+    def day_start_seq(self, chatroom_id: str, day=None) -> int:
         """监控启用时的初始游标：当天最早消息的 sort_seq-1。
 
         - 当天已有消息 → 最早一条的前一位置（首轮即可拉到当天全部消息，
@@ -133,9 +178,7 @@ class MessagePoller:
         """
         from datetime import date as _date
         day = day or _date.today()
-        rows = db_call_with_retry(
-            lambda: self._db.get_messages(chatroom_id, limit=scan_limit),
-            what=f"定位当天起点 {chatroom_id}")  # 降序
+        rows = self._scan_until_day_start(chatroom_id, day)
         if not rows:
             return 0
         today_seqs = [
@@ -146,39 +189,32 @@ class MessagePoller:
             return max(0, min(today_seqs) - 1)
         return int(rows[0]["sort_seq"])
 
-    def count_today(self, chatroom_id: str,
-                    scan_limit: int = 10000) -> int:
+    def count_today(self, chatroom_id: str) -> int:
         """今天 0:00 至今的消息总数（只计数不清洗，跨午夜自动正确）。
 
         用于卡片"今日累计 N 条"显示，区别于"本轮新增"。
-        大群一天消息可能超 scan_limit，此时数字偏低（按降序取最近 N 条过滤）。
+        分页扫描直到越过当天 0 点，大群一天消息再多也不截断。
         """
         from datetime import date as _date
         today = _date.today()
-        rows = db_call_with_retry(
-            lambda: self._db.get_messages(chatroom_id, limit=scan_limit),
-            what=f"统计今日消息 {chatroom_id}")
-        if not rows:
-            return 0
+        rows = self._scan_until_day_start(chatroom_id, today)
         return sum(1 for r in rows
                    if datetime.fromtimestamp(
                        int(r["create_time"])).date() == today)
 
-    def fetch_day(self, chatroom_id: str, day=None,
-                  max_scan: int = 1000) -> list[Message]:
-        """拉取某天（默认今天）的全量消息，升序返回，供全量重建总结。"""
+    def fetch_day(self, chatroom_id: str, day=None) -> list[Message]:
+        """拉取某天（默认今天）的全量消息，升序返回，供全量重建总结。
+
+        分页扫描直到越过当天 0 点：超大群当天消息不再被单次扫描上限截断。
+        """
         from datetime import date as _date
         day = day or _date.today()
-
-        def _once():
-            rows = self._db.get_messages(chatroom_id, limit=max_scan)  # 降序
-            sel = [r for r in rows
-                   if datetime.fromtimestamp(
-                       int(r["create_time"])).date() == day]
-            sel.reverse()
-            return [self._to_message(chatroom_id, r) for r in sel]
-
-        return db_call_with_retry(_once, what=f"总结取数 {chatroom_id}")
+        rows = self._scan_until_day_start(chatroom_id, day)
+        sel = [r for r in rows
+               if datetime.fromtimestamp(
+                   int(r["create_time"])).date() == day]
+        sel.reverse()
+        return [self._to_message(chatroom_id, r) for r in sel]
 
     # ---------- 发送者解析 ----------
     def _chatroom_members(self, chatroom_id: str) -> dict[str, str]:
@@ -240,6 +276,7 @@ class MessagePoller:
 
     def _display_name(self, chatroom_id: str, wxid: str) -> str:
         """wxid → 展示名（群成员表 > contact 昵称 > wxid）。"""
+        self._refresh_stale_caches()
         members = self._chatroom_members(chatroom_id)
         if wxid in members:
             name = members[wxid]

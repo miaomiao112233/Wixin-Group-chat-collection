@@ -34,7 +34,10 @@
 
 ### 1. 使用打包版（推荐给普通用户）
 
-从 [Releases](../../releases) 下载 `WxSum.zip`，解压后双击 `WxSum.exe`。
+从 [Releases](../../releases) 下载后二选一：
+
+- **安装版** `WxSum-v<版本>-Setup.exe`：双击安装（per-user，不弹 UAC），自动创建开始菜单/桌面快捷方式，可从「设置→应用」一键卸载
+- **绿色版** `WxSum-v<版本>-windows-x64.zip`：解压后双击 `WxSum.exe`
 
 首次启动：
 
@@ -80,10 +83,11 @@ python run.py
 │   │   ├── deepseek_client.py# OpenAI 兼容客户端+429 限流退避
 │   │   ├── prompts.py        # map-reduce 分块提示词
 │   │   ├── pipeline.py       # 分块总结→合并→JSON 解析降级
-│   │   └── docx_builder.py   # 五模块 Word 排版
+│   │   └── docx_builder.py   # 六模块 Word 排版
 │   ├── ui\                   # PySide6 主窗口/卡片/设置/托盘
 │   └── workers\              # MonitorWorker / SummaryWorker (QThread)
-├── scripts\                  # 阶段 1 验证脚本（可复跑）
+├── scripts\                  # 阶段验证脚本（可复跑）+ release_build.py 一键发版
+├── installer.iss             # Inno Setup per-user 安装包脚本
 └── 输出\                     # 生成的 docx + 归档文件
 ```
 
@@ -101,33 +105,59 @@ pyinstaller --noconfirm WxSum.spec
 
 ### 发布新版本（自动更新）
 
-程序通过 GitHub Releases 检查更新，发版步骤：
+推荐用一键发版脚本（升版本号 → PyInstaller 打包 → PYZ 关键模块校验 → 压 zip → 编译 Inno Setup 安装包）：
 
-1. 修改 `app/config.py` 中的 `APP_VERSION`（如 `1.3.0`）
-2. 重新打包，把压缩包命名为 `WxSum-v<版本号>-windows-x64.zip`
-3. GitHub 仓库 **Releases → Draft a new release**，tag 填 `v<版本号>`（如 `v1.3.0`），正文写更新说明（会原样显示在用户的更新弹窗里）
-4. 把 zip 拖到附件区上传 → Publish release
+```powershell
+.\.venv\Scripts\python.exe scripts\release_build.py 1.3.0
+```
 
-已安装旧版（v1.2.0+）的用户启动程序后会自动收到更新提示，一键即可完成更新；用户的配置和数据不受影响。
+需要 venv 中已安装 PyInstaller（`pip install pyinstaller`）；本机装有 [Inno Setup 6](https://jrsoftware.org/isdl.php) 时会额外产出 `WxSum-v<版本>-Setup.exe`（未装则自动跳过，只发 zip）。
+
+随后：
+
+1. git 提交推送
+2. GitHub 仓库 **Releases → Draft a new release**，tag 填 `v<版本号>`（如 `v1.3.0`），正文写更新说明（会原样显示在用户的更新弹窗里）
+3. 把 zip（自动更新通道）和 Setup.exe（新用户安装）都拖到附件区 → Publish release
+
+已安装旧版（v1.2.0+）的用户启动程序后会自动收到更新提示，一键即可完成更新；用户的配置和数据不受影响（保存在 `%LOCALAPPDATA%\WxSum\`，不在程序目录）。
 
 ## 数据与隐私
 
-- 微信密钥、解密副本、AI Key、输出 Word 全部保存在本地
-- 密钥缓存在 `%LOCALAPPDATA%\WxSum\`（打包后）或项目 `data\` 下（源码运行）
-- 不向任何第三方上传消息内容；只有 AI 摘要请求会发送当批消息文本到所选服务商
-- 完全可断网运行（选 Ollama 本地服务时）
+- 微信密钥、解密副本、AI Key、输出 Word 全部保存在本地，不上传
+- 密钥缓存在 `%LOCALAPPDATA%\WxSum\`（打包后）或项目 `data\` 下（源码运行）；`data\`、`dbcache\`、`logs\`、`输出\` 均已列入 `.gitignore`，不会误提交
+- 只有 AI 摘要请求会把当批消息文本（含发送者昵称/wxid）发送到所选 AI 服务商；选本地 Ollama 时可完全断网运行
+
+**本地明文数据须知**（当前版本为明文存储，注意保管好本机账户）：
+
+| 文件 | 内容 | 位置（打包版） |
+|---|---|---|
+| `data\config.json` | AI API Key（明文） | `%LOCALAPPDATA%\WxSum\data\` |
+| `data\wechat_keys.json` | 微信数据库解密密钥（明文） | 同上 |
+| `dbcache\<角色>\` | 解密后的聊天数据库副本 | `%LOCALAPPDATA%\WxSum\dbcache\` |
+| `data\ocr_cache.json` | 图片 OCR 提取的文字 | `%LOCALAPPDATA%\WxSum\data\` |
+| `logs\app.log` | 消息预览/群名等运行日志 | `%LOCALAPPDATA%\WxSum\logs\` |
+
+> 多人共用电脑时请注意：以上文件对本机当前用户（及管理员）可读。后续版本计划改用 Windows DPAPI 加密 API Key 与密钥文件。
 
 ## 已知限制
 
 - 微信 4.x 通过 SQLCipher 加密本地数据库，本工具读取密钥**要求微信进程正在运行**；微信退出后密钥失效，需要重新启动微信
 - 免费档 AI（智谱 GLM-4.7-Flash）有并发限制，多群同批总结可能触发 429，工具会自动退避重试但会变慢
+- 自动更新通过 HTTPS 从 GitHub Release 下载 zip，目前校验包内含 `WxSum.exe` 与 ZIP 完整性，未做哈希/签名校验（路线图：发布 SHA-256 清单并核验）
 - Windows 任务栏/标题栏图标由 Qt DWM 渲染，已尽量设置为透明或简洁图标
 
 ## 开发路线
 
 - [x] 支持图片消息识别（OCR 入 Word）
+- [x] Inno Setup per-user 安装包 + 一键发版脚本
 - [ ] 跨日总结（合并多日到一份周报）
 - [ ] 总结模板自定义（学校 / 企业 / 项目场景）
+- [ ] 敏感配置加密存储（API Key / 微信密钥改用 Windows DPAPI）
+- [ ] 更新包 SHA-256 校验（Release 附件附带校验和文件）
+- [ ] 总结历史面板（列表查看/打开历史 docx，打通 state.db 的 summary_run 表）
+- [ ] 卡片快捷入口：打开输出文件夹 / 打开当日 docx
+- [ ] 关键词告警（命中"作业/考试/会议"等词弹系统通知）
+- [ ] 发送者匿名化选项（昵称→用户A/B 再喂给 AI，进一步降低隐私外发）
 
 ## License
 
