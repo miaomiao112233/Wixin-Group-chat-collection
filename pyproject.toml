@@ -1,7 +1,7 @@
 [project]
 name = "wxsum"
 # 发版脚本（release_build.py）升版时会按 APP_VERSION 同步此处；勿单独手改
-version = "1.2.1"
+version = "1.2.2"
 description = "微信群消息监控 + AI 滚动总结 + 文件自动归档"
 requires-python = ">=3.12"
 dependencies = [
