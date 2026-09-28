@@ -38,7 +38,7 @@ PROJECT_ROOT, DATA_DIR, LOGS_DIR, OUTPUT_DIR = _runtime_paths()
 STATE_DB = DATA_DIR / "state.db"
 
 # ---------- 版本 / 自动更新 ----------
-APP_VERSION = "1.2.0"          # 发版前维护；与 GitHub Release tag 对齐
+APP_VERSION = "1.2.1"          # 发版前维护；与 GitHub Release tag 对齐
 GITHUB_REPO = "miaomiao112233/Wixin-Group-chat-collection"
 
 # ---------- 微信解密缓存 ----------
