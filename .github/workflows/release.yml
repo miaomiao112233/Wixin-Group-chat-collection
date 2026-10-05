@@ -1,0 +1,299 @@
+# WxSum 发版流水线
+#
+# 触发：
+#   - 推送 v* tag（如 v1.3.0）→ 版本号取 tag 去掉 v 前缀
+#   - 手动 workflow_dispatch → 版本号取输入（默认走 app/config.py 里的现版本）
+#
+# 流程：单元测试 → release_build.py 升版本+打包+压 zip（+有 Inno 时编译
+# Setup）→ 生成 <资产名>.sha256 → 可选代码签名 → 创建/更新 GitHub Release。
+#
+# 说明：仓库目前没有代码签名证书，签名步骤默认整段跳过（见下方 if 判断），
+# 缺少 CERT_PFX_BASE64 secret 不会让流水线失败。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号 x.y.z（留空则用 app/config.py 中现有版本）"
+        required: false
+        default: ""
+      prerelease:
+        description: "标记为预发布 Release"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  # 项目要求 requires-python >= 3.12；3.12 与 PySide6/PyInstaller 组合最稳
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  build:
+    name: 构建并发布
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = ''
+          if ($env:REF_TYPE -eq 'tag' -and $env:REF_NAME) {
+            $ver = $env:REF_NAME -replace '^[vV]', ''
+          } elseif ($env:INPUT_VERSION) {
+            $ver = $env:INPUT_VERSION.Trim() -replace '^[vV]', ''
+          }
+          if ($ver -and $ver -notmatch '^\d+\.\d+\.\d+$') {
+            throw "版本号格式非法：$ver（应为 x.y.z，不带 v 前缀）"
+          }
+          if (-not $ver) {
+            Write-Host '未指定版本号，沿用 app/config.py 中的现有版本'
+          } else {
+            Write-Host "本次发版版本：$ver"
+          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT `
+            -Encoding utf8 -Append
+
+      - name: 安装依赖（可编辑安装 + 打包依赖）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          # 运行时依赖 + [build] 额外依赖（pyinstaller），发版脚本要用
+          python -m pip install -e ".[build]"
+
+      - name: 运行单元测试
+        if: ${{ hashFiles('tests/*.py') != '' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m unittest discover -s tests -t . -v
+
+      - name: 没有 tests/*.py，跳过单元测试
+        if: ${{ hashFiles('tests/*.py') == '' }}
+        shell: pwsh
+        run: Write-Host '未发现 tests/*.py，跳过单元测试'
+
+      - name: 确认 PyInstaller 可用
+        shell: pwsh
+        run: python -m PyInstaller --version
+
+      - name: 构建产物（升版本 + 打包 + 压 zip + 校验文件）
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_VERSION) {
+            python scripts/release_build.py $env:RELEASE_VERSION
+          } else {
+            python scripts/release_build.py
+          }
+          Write-Host '--- dist 目录 ---'
+          Get-ChildItem dist -File | ForEach-Object {
+            '{0}  {1:N1} MB' -f $_.Name, ($_.Length / 1MB)
+          }
+
+      - name: 计算 SHA-256 校验文件并打印
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in @('.zip', '.exe') })
+          if ($assets.Count -eq 0) { throw 'dist 下没有可发布资产' }
+          foreach ($f in $assets) {
+            $h = Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256
+            $line = '{0}  {1}' -f $h.Hash.ToLowerInvariant(), $f.Name
+            # 与 sha256sum -c / sha256sum --check 的格式一致
+            [System.IO.File]::WriteAllText(
+              "$($f.FullName).sha256", $line + "`n",
+              (New-Object System.Text.UTF8Encoding($false)))
+            # 控制台打印，便于对照日志
+            Write-Host $line
+          }
+          Write-Host '--- 生成的校验文件 ---'
+          Get-ChildItem dist -Filter *.sha256 -File |
+            ForEach-Object { Get-Content -LiteralPath $_.FullName }
+
+      - name: 生成 Release notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $prev = git describe --tags --abbrev=0 HEAD^ 2>$null
+          $range = if ($prev) { "$prev..HEAD" } else { 'HEAD' }
+          $lines = @(git log --pretty=format:'- %s' $range)
+          if ($lines.Count -eq 0) { $lines = @('- 本次发布（详见仓库提交记录）') }
+          $out = @('## 更新内容', '') + $lines
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $PWD 'RELEASE_NOTES.md'), $out,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Write-Host "Release notes 由 $range 生成"
+
+      - name: 上传构建产物（供签名任务使用）
+        uses: actions/upload-artifact@v4
+        with:
+          name: wxsum-dist
+          path: dist
+          retention-days: 3
+
+      - name: 导出未签名资产清单
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 用真实 SHA-256 做指纹（跨进程稳定），供签名后判断是否需要重算
+          $rows = @(Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in @('.zip', '.exe') } |
+            ForEach-Object {
+              $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+              '{0}|{1}' -f $_.Name, $h.Hash.ToLowerInvariant()
+            })
+          [System.IO.File]::WriteAllLines(
+            (Join-Path $PWD 'pre-sign-manifest.txt'), $rows,
+            (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content -LiteralPath 'pre-sign-manifest.txt' | ForEach-Object {
+            Write-Host $_
+          }
+
+      - name: 代码签名（仅在提供证书时执行）
+        if: ${{ secrets.CERT_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.CERT_PFX_BASE64 }}
+          CERT_PFX_PASSWORD: ${{ secrets.CERT_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [System.IO.File]::WriteAllBytes(
+            $pfx, [System.Convert]::FromBase64String($env:CERT_PFX_BASE64))
+          $signtool = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin\x64\signtool.exe",
+            "$env:ProgramFiles\Windows Kits\10\bin\x64\signtool.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $signtool) {
+            $signtool = (Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits"
+              -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match 'x64' } |
+              Select-Object -First 1).FullName
+          }
+          if (-not $signtool) {
+            throw '已提供证书但找不到 signtool.exe（需 Windows SDK）'
+          }
+          $targets = @(Get-ChildItem dist -File -Filter *.exe)
+          if ($targets.Count -eq 0) {
+            Write-Host 'dist 下没有 exe，跳过签名'
+            exit 0
+          }
+          foreach ($exe in $targets) {
+            & $signtool sign /fd SHA256 /f $pfx `
+              /p $env:CERT_PFX_PASSWORD /tr http://timestamp.digicert.com `
+              /td SHA256 $exe.FullName
+            if ($LASTEXITCODE -ne 0) { throw "签名失败：$($exe.Name)" }
+            Write-Host "已签名 $($exe.Name)"
+          }
+
+      - name: 证书缺失，跳过代码签名
+        if: ${{ secrets.CERT_PFX_BASE64 == '' }}
+        shell: pwsh
+        run: |
+          Write-Host '未提供 secrets.CERT_PFX_BASE64，跳过代码签名。'
+          Write-Host '如需签名，请配置 secret：'
+          Write-Host '  CERT_PFX_BASE64   —— .pfx 证书文件的 base64（[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))）'
+          Write-Host '  CERT_PFX_PASSWORD —— 证书导出时的密码'
+
+      - name: 重新生成签名后资产的校验文件
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rows = @(Get-ChildItem dist -File |
+            Where-Object { $_.Extension -in @('.zip', '.exe') } |
+            ForEach-Object {
+              $h = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
+              '{0}|{1}' -f $_.Name, $h.Hash.ToLowerInvariant()
+            })
+          $changed = @(Compare-Object $rows `
+            (Get-Content -LiteralPath 'pre-sign-manifest.txt') |
+            Where-Object { $_.SideIndicator -eq '<=' })
+          if ($changed.Count -eq 0) {
+            Write-Host '没有资产发生变化（签名步骤已跳过），沿用原校验文件'
+            exit 0
+          }
+          Write-Host '检测到资产变化（已签名），重新生成校验文件'
+          foreach ($f in @(Get-ChildItem dist -File |
+              Where-Object { $_.Extension -in @('.zip', '.exe') })) {
+            $h = Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256
+            $line = '{0}  {1}' -f $h.Hash.ToLowerInvariant(), $f.Name
+            [System.IO.File]::WriteAllText(
+              "$($f.FullName).sha256", $line + "`n",
+              (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host $line
+          }
+
+      - name: 汇总 Release 资产
+        id: assets
+        shell: pwsh
+        # 步骤输出 files 供 softprops/action-gh-release 使用
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zips = @(Get-ChildItem dist -File -Filter *.zip)
+          $setups = @(Get-ChildItem dist -File -Filter *.exe)
+          $sums = @(Get-ChildItem dist -File -Filter *.sha256)
+          if ($zips.Count -ne 1) {
+            throw "期望恰好 1 个 zip，实际 $($zips.Count) 个"
+          }
+          if ($sums.Count -eq 0) { throw '没有生成 .sha256 校验文件' }
+          Write-Host "zip: $($zips[0].Name)"
+          Write-Host "setup: $($setups.Count) 个"
+          Write-Host "checksums: $($sums.Name -join ', ')"
+          # softprops/action-gh-release 的 files 用换行分隔 glob，非 Windows 路径
+          $files = @('dist/*.zip', 'dist/*.sha256')
+          if ($setups.Count -gt 0) { $files += 'dist/*.exe' }
+          # 一次写入，避免多次 Out-File 在结束标记前插入 BOM
+          $block = "files<<WXSUM_EOF`n" + ($files -join "`n") + "`nWXSUM_EOF`n"
+          [System.IO.File]::AppendAllText(
+            $env:GITHUB_OUTPUT, $block,
+            (New-Object System.Text.UTF8Encoding($false)))
+
+      - name: 创建或更新 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.ver.outputs.version) }}
+          body_path: RELEASE_NOTES.md
+          files: ${{ steps.assets.outputs.files }}
+          draft: false
+          prerelease: ${{ inputs.prerelease == true }}
+          fail_on_unmatched_files: true
+
+      - name: 结果汇总
+        shell: pwsh
+        run: |
+          Write-Host "Release v${{ steps.ver.outputs.version }} 已发布"
+          Write-Host "仓库：${{ github.repository }}"
+          Write-Host "运行：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 r"""WxSum 发版构建（确定性）：升版本号 → PyInstaller 打包 → 校验产物 →
-压成 GitHub Release 用的 zip。
+压成 GitHub Release 用的 zip → 输出 SHA-256 校验文件。
 
 用法：
     .\.venv\Scripts\python.exe scripts\release_build.py              # 用 config 中现有版本
@@ -10,12 +10,17 @@ r"""WxSum 发版构建（确定性）：升版本号 → PyInstaller 打包 → 
 成功判定不依赖 PyInstaller 进程退出码（沙箱可能在构建完成后写系统 pyc
 缓存受限而报非零码），以 "Build complete" + exe 刚刚刷新为准。
 
+除 zip / Setup.exe 外，还会为每个发布资产生成 `<资产名>.sha256`
+（内容 `<64位小写hex>  <文件名>\n`，可被 `sha256sum -c` 直接校验），
+客户端自动更新下载完 zip 后据此校验完整性（见 app/core/updater.py）。
+
 本脚本只负责构建产物；git 提交/推送与 GitHub Release 创建不在此内
 （见 .trae/skills/wxsum-release/SKILL.md）。
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -159,6 +164,48 @@ def make_zip(version: str) -> Path:
     return zip_path
 
 
+# ---------- 校验文件 ----------
+def sha256_file(path: Path | str, chunk: int = 1 << 20) -> str:
+    """返回文件 SHA-256 的 64 位小写十六进制串（分块读取，省内存）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def write_checksum(path: Path) -> Path:
+    r"""为资产写 `<资产名>.sha256`，返回校验文件路径。
+
+    内容为 `<64位小写hex>  <文件名>\n`（两空格分隔，文件名不含路径），
+    与 Linux `sha256sum -c` / `sha256sum --check` 的格式一致。
+    """
+    digest = sha256_file(path)
+    sum_path = path.with_name(path.name + ".sha256")
+    sum_path.write_text(f"{digest}  {path.name}\n",
+                        encoding="utf-8", newline="\n")
+    return sum_path
+
+
+def write_checksums(paths: list[Path | None]) -> list[Path]:
+    """为多个资产批量生成校验文件，并在控制台打印校验值。"""
+    targets = [p for p in paths if p is not None]
+    if not targets:
+        print("[6] 跳过校验文件：没有可发布的资产")
+        return []
+    print("[6] 生成 SHA-256 校验文件 …")
+    sums: list[Path] = []
+    for p in targets:
+        sp = write_checksum(p)
+        digest = sha256_file(p)
+        print(f"    {sp.name} | sha256 {digest}")
+        sums.append(sp)
+    return sums
+
+
 def find_iscc() -> str | None:
     """定位 Inno Setup 编译器 ISCC.exe。
 
@@ -278,6 +325,7 @@ def main() -> int:
     print(f"发版版本: v{version}")
 
     sp = None
+    zp = None
     if args.setup_only:
         print("[2] --setup-only，跳过构建与 zip")
         sp = build_setup(version, required=True)
@@ -291,15 +339,21 @@ def main() -> int:
         if not args.zip_only:
             sp = build_setup(version, required=args.setup)
 
+    sums = write_checksums([zp, sp])
+
     print("\n[完成] 下一步：")
     print("  1. git add / commit / push")
     print("  2. GitHub Releases 新建 v" + version)
+    if zp is not None:
+        print("     附件上传：" + zp.name + "（自动更新通道）")
     if sp is not None:
-        print("     附件上传：zip（自动更新通道）+ " + sp.name
-              + "（新用户安装）")
+        print("               " + sp.name + "（新用户安装）")
+    if not sums:
+        print("     提示：装 Inno Setup 后可补 Setup 安装包")
     else:
-        print("     附件上传：" + zp.name
-              + "（自动更新通道；装 Inno 后可补 Setup）")
+        print("     校验文件（必须一并上传，客户端据此校验更新包）：")
+        for s in sums:
+            print("       " + s.name)
     return 0
 
 

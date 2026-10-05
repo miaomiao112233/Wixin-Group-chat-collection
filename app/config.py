@@ -38,7 +38,7 @@ PROJECT_ROOT, DATA_DIR, LOGS_DIR, OUTPUT_DIR = _runtime_paths()
 STATE_DB = DATA_DIR / "state.db"
 
 # ---------- 版本 / 自动更新 ----------
-APP_VERSION = "1.2.2"          # 发版前维护；与 GitHub Release tag 对齐
+APP_VERSION = "1.3.0"          # 发版前维护；与 GitHub Release tag 对齐
 GITHUB_REPO = "miaomiao112233/Wixin-Group-chat-collection"
 
 # ---------- 微信解密缓存 ----------
@@ -114,6 +114,16 @@ ARCHIVE_EXTS = {
 
 # ---------- Word 排版 ----------
 DOCX_FONT = "微软雅黑"
+
+
+# ---------- 关键词告警 ----------
+# 命中这些词的群消息会弹托盘通知（点击可打开当日总结），时间窗可静默
+DEFAULT_ALERT_KEYWORDS = "作业,考试,会议,通知,报名,截止,签到,家长会"
+
+# ---------- 解密缓存（dbcache）保留策略 ----------
+# 每个角色一份微信库解密副本，不清理会随微信库大小无限增长
+DBCACHE_KEEP_DAYS = 7           # 超过天数的缓存文件自动清理（0=只按容量限制）
+DBCACHE_MAX_MB = 2048           # 缓存总量上限（MB），超出从最旧开始删
 
 
 def _load_config_json() -> dict:
@@ -210,6 +220,39 @@ def save_ocr_enabled(enabled: bool) -> None:
     """写入图片 OCR 开关。"""
     def _mutate(data: dict) -> None:
         data["ocr_enabled"] = bool(enabled)
+    _apply_config_update(_mutate)
+
+
+def get_alert_config() -> tuple[bool, str, str]:
+    """关键词告警配置：(是否开启, 关键词原文, 静默时段原文)。"""
+    enabled = bool(_CONFIG_JSON.get("alert_enabled", True))
+    keywords = str(_CONFIG_JSON.get("alert_keywords")
+                   or DEFAULT_ALERT_KEYWORDS)
+    silence = str(_CONFIG_JSON.get("alert_silence") or "")
+    return enabled, keywords, silence
+
+
+def save_alert_config(enabled: bool, keywords: str, silence: str) -> None:
+    """写入关键词告警配置（关键词留空则回落到默认词表）。"""
+    def _mutate(data: dict) -> None:
+        data["alert_enabled"] = bool(enabled)
+        data["alert_keywords"] = (keywords or "").strip()
+        data["alert_silence"] = (silence or "").strip()
+    _apply_config_update(_mutate)
+
+
+def get_dbcache_config() -> tuple[int, int]:
+    """解密缓存策略：(保留天数, 总量上限 MB)；0 表示该维度不限制。"""
+    days = int(_CONFIG_JSON.get("dbcache_keep_days", DBCACHE_KEEP_DAYS))
+    max_mb = int(_CONFIG_JSON.get("dbcache_max_mb", DBCACHE_MAX_MB))
+    return max(0, days), max(0, max_mb)
+
+
+def save_dbcache_config(keep_days: int, max_mb: int) -> None:
+    """写入解密缓存策略。"""
+    def _mutate(data: dict) -> None:
+        data["dbcache_keep_days"] = max(0, int(keep_days))
+        data["dbcache_max_mb"] = max(0, int(max_mb))
     _apply_config_update(_mutate)
 
 

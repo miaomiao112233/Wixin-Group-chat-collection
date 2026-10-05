@@ -5,10 +5,13 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QTextLayout, QTextOption
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QVBoxLayout)
+                               QSizePolicy, QToolButton, QVBoxLayout)
+
+from app.ui.frameless import ICON_COLOR, svg_icon
 
 _GREEN = "#07C160"
 _GRAY = "#9AA4AE"
+CARD_WIDTH, CARD_HEIGHT = 300, 180      # 卡片固定尺寸（主窗口据此算列数）
 _CARD_QSS = """
 QFrame#groupCard {
     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -39,7 +42,26 @@ QPushButton#cardBtnDanger {
     border-radius: 10px; padding: 5px 12px; font-size: 12px;
 }
 QPushButton#cardBtnDanger:hover { background: #F6E3E2; }
+QToolButton#cardIcon {
+    background: transparent; border: none; border-radius: 6px;
+}
+QToolButton#cardIcon:hover { background: #E4F6EC; }
+QToolButton#cardIcon:disabled { background: transparent; }
 """
+
+# 卡片上的两个快捷入口图标（feather 风格，与标题栏窗口按钮同一套渲染）
+_ICON_FOLDER = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="{s}" height="{s}" '
+    'viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4L11 8.5h8.5A1.5 1.5 0 0 1 21 10v7.5a1.5 '
+    '1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>')
+_ICON_DOC = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="{s}" height="{s}" '
+    'viewBox="0 0 24 24" fill="none" stroke="{c}" stroke-width="2" '
+    'stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/>'
+    '<path d="M14 3v5h5"/></svg>')
 
 
 class ElidedLabel(QLabel):
@@ -131,9 +153,11 @@ class GroupCard(QFrame):
     toggled = Signal(str, str, bool)     # chatroom, name, enabled
     summarize = Signal(str, str)         # chatroom, name
     removed = Signal(str, str)           # chatroom, name
+    open_folder = Signal(str, str)       # chatroom, name
+    open_today = Signal(str, str)        # chatroom, name
 
     def __init__(self, group: dict, status: dict | None = None,
-                 parent=None):
+                 has_doc: bool = False, parent=None):
         super().__init__(parent)
         self.chatroom = group["chatroom_id"]
         self.group_name = group["group_name"]
@@ -141,18 +165,28 @@ class GroupCard(QFrame):
         self.setStyleSheet(_CARD_QSS)
         # 高度 ≥ 布局最小需求（实测 174）：留 6px 余量给行间弹性，
         # 否则固定尺寸下布局反向压缩控件、文字被竖向裁掉
-        self.setFixedSize(300, 180)
+        self.setFixedSize(CARD_WIDTH, CARD_HEIGHT)
         self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(16, 14, 16, 12)
         v.setSpacing(8)
 
-        # 行1：群名（单行省略，长名不再换行顶爆卡片）+ 开关
+        # 行1：群名（单行省略）+ 快捷入口 + 开关
         top = QHBoxLayout()
+        top.setSpacing(4)
         self.lb_title = ElidedLabel(self.group_name, 1)
         self.lb_title.setObjectName("cardTitle")
         top.addWidget(self.lb_title, 1)
+        self.btn_folder = self._icon_button(
+            _ICON_FOLDER, "打开该群的输出文件夹",
+            lambda: self.open_folder.emit(self.chatroom, self.group_name))
+        top.addWidget(self.btn_folder)
+        self.btn_doc = self._icon_button(
+            _ICON_DOC, "打开今日 Word 总结",
+            lambda: self.open_today.emit(self.chatroom, self.group_name))
+        self.btn_doc.setEnabled(bool(has_doc))
+        top.addWidget(self.btn_doc)
         self.enabled = bool(group["enabled"])
         self.btn_toggle = QPushButton()
         self.btn_toggle.setCursor(Qt.PointingHandCursor)
@@ -204,6 +238,24 @@ class GroupCard(QFrame):
             self.lb_summary.setRawText("")
         else:
             self.update_status(status or {})
+
+    # ---------- 快捷入口 ----------
+    @staticmethod
+    def _icon_button(svg: str, tip: str, on_click) -> QToolButton:
+        btn = QToolButton()
+        btn.setObjectName("cardIcon")
+        btn.setFixedSize(24, 24)
+        btn.setIconSize(QSize(16, 16))
+        btn.setIcon(svg_icon(svg, ICON_COLOR, 16))
+        btn.setToolTip(tip)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFocusPolicy(Qt.NoFocus)
+        btn.clicked.connect(on_click)
+        return btn
+
+    def set_has_doc(self, has_doc: bool) -> None:
+        """今日是否已有 Word 总结（决定「当日文档」图标是否可点）。"""
+        self.btn_doc.setEnabled(bool(has_doc))
 
     # ---------- 状态 ----------
     def update_status(self, status: dict):

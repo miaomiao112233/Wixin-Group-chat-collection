@@ -2,8 +2,9 @@
 """更新对话框 + 检查/下载后台线程。
 
 - CheckThread：请求 GitHub API（供启动静默检查、托盘手动检查复用）
-- DownloadThread：流式下载 zip，带进度，可取消
+- DownloadThread：流式下载 zip，带进度，可取消，下完校验 SHA-256
 - UpdateDialog：版本信息 / Release 说明 / 立即更新（进度条）/ 跳过 / 稍后
+  （无边框自绘标题栏，与主窗口风格一致）
 """
 from __future__ import annotations
 
@@ -13,13 +14,14 @@ import tempfile
 from PySide6.QtCore import QThread, Signal, Qt, QTimer
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtCore import QUrl
-from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QProgressBar,
-                               QPushButton, QTextEdit, QVBoxLayout,
-                               QMessageBox)
+from PySide6.QtWidgets import (QHBoxLayout, QLabel, QProgressBar,
+                               QPushButton, QTextEdit, QVBoxLayout)
 
 from app.config import APP_VERSION, GITHUB_REPO, save_skip_version
 from app.core import updater
 from app.core.updater import ReleaseInfo
+from app.ui import msgbox
+from app.ui.frameless import FramelessDialog
 
 
 # ---------- 后台线程 ----------
@@ -36,13 +38,16 @@ class CheckThread(QThread):
 
 class DownloadThread(QThread):
     progress = Signal(int, int)        # done, total (bytes)
+    status = Signal(str)               # 校验中 / 校验通过 / 跳过校验
     ok = Signal(str)                   # 下载好的文件路径
     error = Signal(str)
 
-    def __init__(self, url: str, dest: str, parent=None):
+    def __init__(self, url: str, dest: str,
+                 release: ReleaseInfo | None = None, parent=None):
         super().__init__(parent)
         self._url = url
         self._dest = dest
+        self._release = release        # ReleaseInfo：提供 SHA-256 校验地址
         import threading
         self._cancel = threading.Event()
 
@@ -55,6 +60,8 @@ class DownloadThread(QThread):
                 self._url, self._dest,
                 progress_cb=lambda d, t: self.progress.emit(d, t),
                 cancel_event=self._cancel)
+            # 下载完成 → SHA-256 校验（无校验文件时只是记日志并放行）
+            self._verify()
             self.ok.emit(self._dest)
         except Exception as e:                       # noqa: BLE001
             try:
@@ -67,10 +74,25 @@ class DownloadThread(QThread):
             else:
                 self.error.emit(f"{type(e).__name__}: {e}")
 
+    def _verify(self):
+        """比对官方 SHA-256；不一致抛 RuntimeError（由 run 统一清理）。"""
+        if self._cancel.is_set():
+            raise RuntimeError("用户取消下载")
+        self.status.emit("校验中…（正在获取官方 SHA-256）")
+        try:
+            text = updater.verify_release_checksum(
+                self._dest, release=self._release,
+                cancel_event=self._cancel)
+        except RuntimeError as e:
+            if "取消" in str(e):
+                raise
+            self.status.emit("校验失败")
+            raise
+        self.status.emit(text)
+
 
 # ---------- 对话框 ----------
 _DLG_QSS = """
-QDialog { background: #F3F5F4; }
 QLabel#upTitle { font-size: 17px; font-weight: 700; color: #1F2D2A; }
 QLabel#upMeta { font-size: 12px; color: #7A8683; }
 QTextEdit {
@@ -94,21 +116,30 @@ QProgressBar {
 QProgressBar::chunk { background: #07C160; border-radius: 7px; }
 """
 
+# 进度文字配色：默认灰 / 通过绿 / 失败红
+_GRAY = "#7A8683"
+_GREEN = "#07C160"
+_RED = "#D93025"
 
-class UpdateDialog(QDialog):
+
+def _label_qss(color: str) -> str:
+    return f"color:{color}; font-size:12px;"
+
+
+class UpdateDialog(FramelessDialog):
     def __init__(self, release: ReleaseInfo, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, title="软件更新")
         self._release = release
         self._dl_thread: DownloadThread | None = None
-        self.setWindowTitle("软件更新")
         self.setStyleSheet(_DLG_QSS)
-        self.setMinimumWidth(480)
+        self.resize_content(520, 470)
         self._build_ui()
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(22, 20, 22, 20)
+        root = QVBoxLayout()
+        root.setContentsMargins(22, 6, 22, 18)
         root.setSpacing(12)
+        self.body_layout.addLayout(root)
 
         title = QLabel(f"发现新版本 {self._release.tag}")
         title.setObjectName("upTitle")
@@ -181,8 +212,10 @@ class UpdateDialog(QDialog):
         fd, dest = tempfile.mkstemp(prefix="WxSum-update-", suffix=".zip")
         os.close(fd)
         os.remove(dest)             # mkstemp 生成空文件，下载流程自己写
-        self._dl_thread = DownloadThread(self._release.url, dest, self)
+        self._dl_thread = DownloadThread(self._release.url, dest,
+                                         self._release, self)
         self._dl_thread.progress.connect(self._on_progress)
+        self._dl_thread.status.connect(self._on_status)
         self._dl_thread.ok.connect(self._on_downloaded)
         self._dl_thread.error.connect(self._on_download_error)
         self._dl_thread.start()
@@ -215,6 +248,16 @@ class UpdateDialog(QDialog):
             self.progress.setRange(0, 0)          # 忙碌指示
             self.lb_pct.setText(f"已下载 {self._mb(done)}")
 
+    def _on_status(self, text: str):
+        """SHA-256 校验阶段的状态文字（校验中/校验通过/校验失败/跳过）。"""
+        color = _GRAY
+        if "失败" in text or "不一致" in text:
+            color = _RED
+        elif "通过" in text or "跳过" in text:
+            color = _GREEN
+        self.lb_pct.setStyleSheet(_label_qss(color))
+        self.lb_pct.setText(text)
+
     def _on_cancel_download(self):
         if self._dl_thread and self._dl_thread.isRunning():
             self._dl_thread.request_cancel()
@@ -225,7 +268,7 @@ class UpdateDialog(QDialog):
         try:
             updater.apply_and_restart(path)
         except Exception as e:                    # noqa: BLE001
-            QMessageBox.warning(self, "更新失败", str(e))
+            msgbox.warning(self, "更新失败", str(e))
             self._exit_download_mode()
             return
         self.progress.setRange(0, 100)
@@ -242,8 +285,15 @@ class UpdateDialog(QDialog):
     def _on_download_error(self, msg: str):
         self._exit_download_mode()
         self.btn_cancel_dl.setEnabled(True)
+        if "校验失败" in msg:
+            # 失败原因（含 SHA-256）直接留在进度文字上，不只弹一次对话框
+            self.lb_pct.setStyleSheet(_label_qss(_RED))
+            self.lb_pct.setText("校验失败：已删除下载文件，未安装")
+            self.lb_pct.show()
         if msg != "已取消":
-            QMessageBox.warning(self, "下载失败", msg)
+            msgbox.warning(self, "下载失败", msg)
+        else:
+            self.lb_pct.setStyleSheet(_label_qss(_GRAY))
 
     def closeEvent(self, ev):
         if self._dl_thread and self._dl_thread.isRunning():

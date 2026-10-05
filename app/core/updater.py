@@ -13,15 +13,22 @@ ps1 等待进程消失，用 Expand-Archive 覆盖程序目录，再重启 exe�
 不重启、zip 残留、无任何提示"。powershell.exe + CREATE_NO_WINDOW
 无此问题，且支持 try/catch 与中文不乱码（utf-8-sig）。
 
-仅依赖标准库（urllib / zipfile / subprocess），不增加打包体积。
+仅依赖标准库（urllib / zipfile / subprocess / hashlib），不增加打包体积。
 用户数据（config.json / state.db / API Key）在 %LOCALAPPDATA%\WxSum，
 不在程序目录内，覆盖更新不丢配置。
+
+更新包完整性：发版流水线会为 zip 附一个 `<zip 名>.sha256`（或
+`checksums.txt`）。若 Release 提供，客户端下载后比对 SHA-256——不一致
+立即删除已下载文件并报错；未提供则只记日志并跳过校验，保证老 Release
+（v1.2.x 及更早，没有校验文件）仍能正常更新。
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -42,6 +49,11 @@ _UA = "WxSum-Updater"
 # 崩溃（见模块 docstring），导致更新脚本一步都跑不完。
 _CREATE_NO_WINDOW = 0x08000000
 
+# 校验文件名固定后缀 / 通用校验清单名；均不区分大小写
+_SHA256_SUFFIX = ".sha256"
+_CHECKSUM_TXT = "checksums.txt"
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 @dataclass
 class ReleaseInfo:
@@ -51,6 +63,10 @@ class ReleaseInfo:
     url: str | None              # zip 下载地址（无匹配 asset 时为 None）
     size: int                    # zip 字节数
     prerelease: bool
+    # --- 以下为增量字段，全部带默认值以保证向后兼容 ---
+    name: str = ""               # zip 资产文件名，如 WxSum-v1.3.0-windows-x64.zip
+    checksum_url: str | None = None      # 校验文件下载地址（没有则为 None）
+    checksum_name: str = ""      # 校验文件名，如 <zip 名>.sha256 / checksums.txt
 
     @property
     def size_mb(self) -> str:
@@ -94,7 +110,12 @@ def check_latest(timeout: int = 10) -> ReleaseInfo:
 
     tag = str(data.get("tag_name") or "")
     assets = data.get("assets") or []
-    zip_url, zip_size = _pick_zip(assets)
+    zip_url, zip_size, zip_name = _pick_zip(assets)
+    sum_url, sum_name = _pick_checksum(assets, zip_name)
+    if zip_name:
+        log.info("Release %s 更新包：%s（%s）；校验文件：%s",
+                 tag or "?", zip_name, zip_size,
+                 sum_name or "未提供（跳过校验）")
     return ReleaseInfo(
         version=tag.lstrip("vV"),
         tag=tag,
@@ -102,38 +123,226 @@ def check_latest(timeout: int = 10) -> ReleaseInfo:
         url=zip_url,
         size=zip_size,
         prerelease=bool(data.get("prerelease")),
+        name=zip_name,
+        checksum_url=sum_url,
+        checksum_name=sum_name,
     )
 
 
-def _pick_zip(assets: list[dict]) -> tuple[str | None, int]:
-    """从 assets 中挑选更新包 zip：优先 windows x64，其次任意 zip。"""
-    candidates: list[tuple[int, str, int]] = []
+def _pick_zip(assets: list[dict]) -> tuple[str | None, int, str]:
+    """从 assets 中挑选更新包 zip：优先 windows x64，其次任意 zip。
+
+    返回 (下载地址, 字节数, 资产文件名)；没找到时 (None, 0, "")。
+    """
+    candidates: list[tuple[int, str, int, str]] = []
     for a in assets:
-        name = str(a.get("name") or "").lower()
+        name = str(a.get("name") or "")
         url = str(a.get("browser_download_url") or "")
-        if not name.endswith(".zip") or not url:
+        if not name.lower().endswith(".zip") or not url:
             continue
+        low = name.lower()
         score = 0
-        if "wxsum" in name:
+        if "wxsum" in low:
             score += 4
-        if "windows" in name or "win" in name:
+        if "windows" in low or "win" in low:
             score += 2
-        if "x64" in name:
+        if "x64" in low:
             score += 1
-        candidates.append((score, url, int(a.get("size") or 0)))
+        candidates.append((score, url, int(a.get("size") or 0), name))
     if not candidates:
-        return None, 0
+        return None, 0, ""
     candidates.sort(key=lambda c: c[0], reverse=True)
-    return candidates[0][1], candidates[0][2]
+    return candidates[0][1], candidates[0][2], candidates[0][3]
+
+
+def _pick_checksum(assets: list[dict],
+                   zip_name: str) -> tuple[str | None, str]:
+    """找 zip 对应的校验文件：优先 `<zip 名>.sha256`，其次 checksums.txt。
+
+    返回 (下载地址, 资产文件名)；没有则 (None, "")。老 Release 没有校验
+    文件属于正常情况，调用方按"跳过校验"处理。
+    """
+    if not zip_name:
+        return None, ""
+    wanted = zip_name.lower() + _SHA256_SUFFIX    # <zip 名>.sha256
+    exact: tuple[str, str] | None = None
+    generic: tuple[str, str] | None = None
+    for a in assets:
+        name = str(a.get("name") or "")
+        url = str(a.get("browser_download_url") or "")
+        if not name or not url:
+            continue
+        low = name.lower()
+        if low == wanted:
+            exact = (url, name)
+            break
+        if low == _CHECKSUM_TXT and generic is None:
+            generic = (url, name)
+    return exact or generic or (None, "")
+
+
+# ---------- SHA-256 校验 ----------
+def parse_checksum(text: str, expected_name: str) -> str | None:
+    r"""从 sha256sum 文本里取出 `expected_name` 的摘要（小写 hex）。
+
+    兼容 `sha256sum` 的两种行格式（"<hex>  <文件名>" 与 "<hex> *<文件名>"），
+    忽略空行与 # / ; 开头的注释；文件名可带 ./ 或 * 前缀，只比 basename。
+    找不到或格式不合法返回 None。
+    """
+    if not expected_name:
+        return None
+    target = expected_name.strip().lower()
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        digest, name = parts[0].strip().lower(), parts[1].strip()
+        if not _HEX64_RE.match(digest):
+            continue
+        name = name.lstrip("*").replace("\\", "/")
+        base = name.rsplit("/", 1)[-1].lower()
+        if base == target:
+            return digest
+    return None
+
+
+def sha256_file(path: str | Path, chunk: int = 1 << 20) -> str:
+    """返回文件 SHA-256 的 64 位小写十六进制串（分块读取，省内存）。"""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk)
+            if not block:
+                break
+            h.update(block)
+    return h.hexdigest()
+
+
+def fetch_checksum(url: str, expected_name: str,
+                   timeout: int = 15) -> str | None:
+    """下载校验文件并取出 expected_name 的摘要；网络失败抛异常。
+
+    地址取不到（HTTP 错误）时抛异常，由调用方决定是重试还是报错；
+    能取到但内容里没有该文件名时返回 None（视为校验失败）。
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    for enc in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = raw.decode("utf-8", "replace")
+    return parse_checksum(text, expected_name)
+
+
+def fetch_checksum_safe(url: str, expected_name: str) -> str | None:
+    """fetch_checksum 的包装：网络异常统一转成中文 RuntimeError。"""
+    try:
+        return fetch_checksum(url, expected_name)
+    except RuntimeError:
+        raise
+    except Exception as e:                          # noqa: BLE001
+        log.warning("校验文件下载失败：%s: %s", type(e).__name__, e)
+        raise RuntimeError(
+            f"校验失败：无法获取校验文件（{type(e).__name__}）。"
+            "请稍后重试，或到 GitHub 手动下载更新包。") from e
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    """取消事件已置位时抛用户取消（供下载/校验各阶段调用）。"""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("用户取消下载")
+
+
+def _checksum_spec(checksum_url: str | None,
+                   release: ReleaseInfo | None, dest: str,
+                   expected_name: str | None) -> tuple[str, str] | None:
+    """整理校验所需信息：(校验文件地址, zip 资产文件名)。
+
+    没有任何校验地址时返回 None（调用方跳过校验）。
+    """
+    if not checksum_url and release is not None:
+        checksum_url = release.checksum_url
+    if not checksum_url:
+        return None
+    if not expected_name:
+        if release is not None:
+            expected_name = release.name or None
+        if not expected_name:
+            # ReleaseInfo 里也没有（老数据/手工构造）就退回本地文件名。
+            # 下载目录用的是 mkstemp 随机名，此时大概率取不到摘要，
+            # 会走"校验文件异常"分支而不是静默放行。
+            expected_name = Path(dest).name
+    return checksum_url, expected_name
+
+
+def verify_release_checksum(path: str, release: ReleaseInfo | None = None,
+                            checksum_url: str | None = None,
+                            expected_name: str | None = None,
+                            cancel_event: threading.Event | None = None,
+                            ) -> str:
+    """校验 zip 的 SHA-256，返回中文结果文案。
+
+    - 无校验地址：返回"未提供校验文件，已跳过校验"，不抛异常（兼容老 Release）
+    - 摘要缺失 / 不一致：抛 RuntimeError（中文，含"校验失败"），调用方须删除文件
+    - 取消：抛 RuntimeError("用户取消下载")
+    - 网络异常：抛 RuntimeError（中文），不会逃逸成未捕获异常
+
+    调用前会先确保 dest 已写完（下载流程结束）。
+    """
+    spec = _checksum_spec(checksum_url, release, path, expected_name)
+    if spec is None:
+        log.info("Release 未提供 SHA-256 校验文件，跳过校验")
+        return "未提供校验文件，已跳过校验"
+    url, name = spec
+
+    _raise_if_cancelled(cancel_event)
+    digest = fetch_checksum_safe(url, name)
+    if not digest:
+        raise RuntimeError(
+            f"校验失败：校验文件里没有 {name} 对应记录，"
+            "可能被篡改或下载损坏，已删除已下载文件。")
+    _raise_if_cancelled(cancel_event)
+
+    actual = sha256_file(path)
+    if actual != digest:
+        log.warning("SHA-256 不一致：期望 %s，实际 %s", digest, actual)
+        raise RuntimeError(
+            "校验失败：更新包 SHA-256 与官方校验值不一致，"
+            "文件可能被篡改或下载已损坏，已删除已下载文件。\n"
+            f"官方：{digest}\n实际：{actual}")
+    log.info("SHA-256 校验通过：%s", actual)
+    return "校验通过"
 
 
 # ---------- 下载 ----------
 def download(url: str, dest: str,
              progress_cb=None,
              cancel_event: threading.Event | None = None) -> str:
-    """流式下载到 dest；progress_cb(done, total)；取消抛 RuntimeError。"""
+    """流式下载到 dest；progress_cb(done, total)；取消抛 RuntimeError。
+
+    只负责下载与 zip 结构自检；SHA-256 比对由 verify_release_checksum
+    在下载完成后调用（这样进度条不会被校验请求打断）。网络失败统一转成
+    中文 RuntimeError，避免 UI 直接吃到 URLError。
+    """
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    try:
+        resp_ctx = urllib.request.urlopen(req, timeout=30)
+    except Exception as e:                          # noqa: BLE001
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("用户取消下载") from e
+        log.warning("更新包下载失败：%s: %s", type(e).__name__, e)
+        raise RuntimeError(
+            f"下载失败：无法连接更新服务器（{type(e).__name__}）。"
+            "请检查网络后重试，或到 GitHub 手动下载更新包。") from e
+    with resp_ctx as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         done = 0
         with open(dest, "wb") as f:

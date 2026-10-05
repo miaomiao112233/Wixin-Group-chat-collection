@@ -251,6 +251,40 @@ class StateStore:
         finally:
             conn.close()
 
+    # ---------- summary_run 查询（历史面板）----------
+    def list_summary_runs(self, limit: int = 300,
+                          chatroom_id: str | None = None,
+                          status: str | None = None) -> list[dict]:
+        """按时间倒序列出总结记录（可按群/状态过滤）。"""
+        sql = "SELECT * FROM summary_run WHERE 1=1"
+        args: list = []
+        if chatroom_id:
+            sql += " AND chatroom_id=?"
+            args.append(chatroom_id)
+        if status:
+            sql += " AND status=?"
+            args.append(status)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(max(1, int(limit)))
+        conn = self._conn()
+        try:
+            return [dict(r) for r in conn.execute(sql, args).fetchall()]
+        finally:
+            conn.close()
+
+    def today_docx(self, chatroom_id: str, date: str) -> str | None:
+        """某群某日已生成的最新 docx 路径（卡片"当日文档"入口用）。"""
+        conn = self._conn()
+        try:
+            row = conn.execute(
+                "SELECT docx_path FROM summary_run WHERE chatroom_id=? "
+                "AND date=? AND status='done' AND IFNULL(docx_path,'')<>'' "
+                "ORDER BY id DESC LIMIT 1",
+                (chatroom_id, date)).fetchone()
+            return row["docx_path"] if row else None
+        finally:
+            conn.close()
+
     # ---------- archived_file ----------
     def upsert_archived_file(self, chatroom_id: str, date: str,
                              orig_name: str, saved_path: str, size: int,
@@ -317,5 +351,26 @@ class StateStore:
                 (_now(), level, module, message[:2000]),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def list_errors(self, limit: int = 300) -> list[dict]:
+        """按时间倒序列出错误记录（诊断面板用）。"""
+        conn = self._conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM error_log ORDER BY id DESC LIMIT ?",
+                (max(1, int(limit)),)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def clear_errors(self) -> int:
+        """清空错误记录，返回删除行数。"""
+        conn = self._conn()
+        try:
+            cur = conn.execute("DELETE FROM error_log")
+            conn.commit()
+            return int(cur.rowcount or 0)
         finally:
             conn.close()

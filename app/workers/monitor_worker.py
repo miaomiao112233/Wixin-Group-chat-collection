@@ -9,9 +9,12 @@ from datetime import datetime, timedelta
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from app.config import (DAILY_FORCE_TIME, OUTPUT_DIR, POLL_INTERVAL_SEC,
-                        get_auto_archive)
+                        get_alert_config, get_auto_archive)
+from app.core.alerts import AlertGate, in_silence, match, parse_keywords, \
+    parse_silence
 from app.core.archiver import Archiver
 from app.core.interval_ctl import IntervalController
+from app.core.maintenance import check_wechat_running as _is_wechat_running
 from app.core.message_poller import MessagePoller
 from app.state_store import StateStore
 
@@ -21,22 +24,8 @@ log = logging.getLogger("app.schedule")
 # 系统睡眠唤醒/事件循环短暂阻塞后，最迟下一分钟也能补发触发）
 SCHEDULE_CHECK_SEC = 60
 
-
-def _is_wechat_running() -> bool:
-    """微信 4.x 进程名通常为 Weixin.exe（兼容旧版 WeChat.exe）。
-
-    tasklist 在中文系统输出为 GBK，故用字节模式匹配避免解码异常。
-    """
-    import subprocess
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            capture_output=True, timeout=10,
-            creationflags=0x08000000,  # CREATE_NO_WINDOW
-        ).stdout.lower()
-        return b"weixin.exe" in out or b"wechat.exe" in out
-    except Exception:
-        return True   # 探测本身失败时不误报，交给库报错
+# 同一群同一个关键词的告警冷却时间（秒）：刷屏时同一个词只提醒一次
+ALERT_COOLDOWN_SEC = 600
 
 
 class MonitorWorker(QObject):
@@ -49,6 +38,7 @@ class MonitorWorker(QObject):
     request_poll = Signal()          # UI 添加群后请求立即轮询一次
     request_reconnect = Signal()     # UI 请求重连（emit 排队到本线程执行）
     reschedule_requested = Signal()  # UI 请求重排总结调度
+    keyword_alert = Signal(str, str, str)  # 群名, 命中关键词, 摘要片段
 
     def __init__(self, store: StateStore):
         super().__init__()
@@ -57,6 +47,7 @@ class MonitorWorker(QObject):
         self._poller: MessagePoller | None = None
         self._archiver: Archiver | None = None
         self._ctl = IntervalController()
+        self._alert_gate = AlertGate(ALERT_COOLDOWN_SEC)
         self._poll_timer: QTimer | None = None
         self._summary_timer: QTimer | None = None
         self._next_summary_ts: float = 0.0   # 下一次总结的绝对时间戳
@@ -167,6 +158,7 @@ class MonitorWorker(QObject):
                                 f"[{name}] 归档 {len(archived)} 个文件: "
                                 + ", ".join(f"{f.orig_name}({f.status})"
                                             for f in archived))
+                    self._scan_alerts(chatroom, name, msgs)
                     preview = (f"{msgs[0].sender_name}: "
                                f"{msgs[0].content[:24]}")
                 else:
@@ -273,6 +265,32 @@ class MonitorWorker(QObject):
     @Slot(str, str)
     def manual_summary(self, chatroom_id: str, group_name: str):
         self.ask_summary.emit(chatroom_id, group_name, "")
+
+    # ---------- 关键词告警 ----------
+    def _scan_alerts(self, chatroom: str, name: str, msgs) -> None:
+        """命中所配置关键词就发告警信号（静默时段 + 冷却节流）。
+
+        只做纯文本匹配（含文件名），不触发 OCR/解密等重活，避免拖慢采集。
+        """
+        try:
+            enabled, kw_text, silence = get_alert_config()
+            if not enabled:
+                return
+            keywords = parse_keywords(kw_text)
+            if not keywords:
+                return
+            if in_silence(datetime.now().time(), parse_silence(silence)):
+                return
+            for m in msgs:
+                text = m.content or ""
+                if m.file_name:
+                    text = f"{text} {m.file_name}"
+                kw = match(text, keywords)
+                if kw and self._alert_gate.allow(chatroom, kw):
+                    snippet = f"{m.sender_name}: {text.strip()[:70]}"
+                    self.keyword_alert.emit(name, kw, snippet)
+        except Exception as e:                          # noqa: BLE001
+            log.warning("关键词告警检查失败: %s", e)
 
     # ---------- 错误落库 ----------
     def _log_error(self, module: str, message: str):
